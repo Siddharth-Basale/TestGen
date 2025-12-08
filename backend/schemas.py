@@ -34,13 +34,12 @@ class Token(BaseModel):
 
 # Session schemas
 class SessionCreate(BaseModel):
-    title: Optional[str] = None
+    title: Optional[str] = None  # Optional, will be auto-generated from user_prompt if not provided
     user_prompt: str
     
     class Config:
         json_schema_extra = {
             "example": {
-                "title": "My Test Session",
                 "user_prompt": "I run an e-commerce platform..."
             }
         }

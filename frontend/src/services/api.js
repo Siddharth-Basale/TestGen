@@ -33,5 +33,31 @@ api.interceptors.response.use(
   }
 )
 
+// Streaming helper function
+export const streamRequest = async (url, options = {}) => {
+  const token = localStorage.getItem('token')
+  const headers = {
+    'Content-Type': 'application/json',
+    ...options.headers,
+  }
+  
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  
+  const response = await fetch(`${api.defaults.baseURL}${url}`, {
+    method: options.method || 'POST',
+    headers,
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  })
+  
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Request failed' }))
+    throw new Error(error.detail || 'Request failed')
+  }
+  
+  return response
+}
+
 export default api
 

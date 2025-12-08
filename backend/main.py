@@ -4,9 +4,12 @@ FastAPI Backend for Test Case Generation System
 from fastapi import FastAPI, Depends, HTTPException, status, Query, Header, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import uvicorn
+import json
+import asyncio
 
 from database import SessionLocal, engine, Base
 from models import User, Session as SessionModel
@@ -22,7 +25,7 @@ from auth import (
 import sys
 import os
 
-from testcasegen import TestCaseGenerator
+from testcasegen import TestCaseGenerator, generate_session_title
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -182,9 +185,12 @@ def create_session(
                 detail="user_prompt is required"
             )
         
+        # Generate title automatically from business description
+        generated_title = generate_session_title(session_data.user_prompt.strip())
+        
         db_session = SessionModel(
             user_id=user.id,
-            title=session_data.title or "New Session",
+            title=generated_title,
             user_prompt=session_data.user_prompt.strip(),
             state_data={}
         )
@@ -434,6 +440,251 @@ def start_session(
         raise HTTPException(status_code=500, detail=f"Failed to start session: {str(e)}")
 
 
+@app.post("/api/sessions/{session_id}/start/stream")
+async def start_session_stream(
+    session_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Start test case generation for a session with streaming"""
+    authorization = request.headers.get("Authorization")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    
+    try:
+        token = authorization[7:]
+        from jose import jwt, JWTError
+        from auth import SECRET_KEY, ALGORITHM
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        
+        db_session = db.query(SessionModel).filter(
+            SessionModel.id == session_id,
+            SessionModel.user_id == user.id
+        ).first()
+        
+        if not db_session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Session not found"
+            )
+        
+        generator = TestCaseGenerator()
+        generator.current_thread_id = f"user_{user.id}_session_{session_id}"
+        
+        initial_state = {
+            "user_initial_prompt": db_session.user_prompt,
+            "l1_clarification_questions": [],
+            "l1_clarification_answers": {},
+            "l1_test_cases": [],
+            "selected_l1_case": None,
+            "selected_l1_index": None,
+            "l2_clarification_questions": [],
+            "l2_clarification_answers": {},
+            "l2_test_cases": [],
+            "selected_l2_case": None,
+            "selected_l2_index": None,
+            "l3_clarification_questions": [],
+            "l3_clarification_answers": {},
+            "l3_test_cases": [],
+            "answered_history": [],
+            "global_summary": "",
+            "full_tree_data": {},
+            "current_level": "l1",
+            "session_id": generator.current_thread_id
+        }
+        
+        # Update checkpoint and save initial state immediately before streaming starts
+        config = {"configurable": {"thread_id": generator.current_thread_id}}
+        generator.app.update_state(config, initial_state)
+        db_session.state_data = initial_state
+        db.commit()
+        
+        async def generate():
+            try:
+                # Stream L1 questions generation
+                import asyncio
+                token_count = 0
+                stream_iter = generator.stream_ask_l1_questions(initial_state)
+                for chunk in stream_iter:
+                    if chunk.get("type") == "token":
+                        token = chunk.get("token", "")
+                        full_text = chunk.get("full_text", "")
+                        yield f"data: {json.dumps({'type': 'token', 'token': token, 'full_text': full_text})}\n\n"
+                        # Flush immediately for real-time streaming
+                        await asyncio.sleep(0)
+                        # Save state periodically (every 10 tokens) to prevent data loss
+                        token_count += 1
+                        if token_count % 10 == 0:
+                            try:
+                                db_session.state_data = initial_state
+                                db.commit()
+                            except Exception as e:
+                                print(f"Error saving state during streaming: {e}")
+                    elif chunk.get("type") == "complete":
+                        questions = chunk.get("questions", [])
+                        initial_state["l1_clarification_questions"] = questions
+                        initial_state["current_level"] = "l1"
+                        
+                        # Update checkpoint
+                        config = {"configurable": {"thread_id": generator.current_thread_id}}
+                        generator.app.update_state(config, initial_state)
+                        
+                        # Save to database
+                        db_session.state_data = initial_state
+                        db.commit()
+                        
+                        yield f"data: {json.dumps({'type': 'complete', 'state': initial_state})}\n\n"
+            except Exception as e:
+                import traceback
+                error_msg = str(e)
+                traceback.print_exc()
+                # Save state even on error to prevent data loss
+                try:
+                    db_session.state_data = initial_state
+                    db.commit()
+                except Exception as save_error:
+                    print(f"Error saving state on error: {save_error}")
+                yield f"data: {json.dumps({'type': 'error', 'error': error_msg})}\n\n"
+        
+        return StreamingResponse(generate(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        })
+    except HTTPException:
+        raise
+    except JWTError as e:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to start session: {str(e)}")
+
+
+@app.post("/api/sessions/{session_id}/l1/answers/stream")
+async def submit_l1_answers_stream(
+    session_id: int,
+    answers: QuestionAnswer,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Submit L1 clarification answers with streaming"""
+    authorization = request.headers.get("Authorization")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    
+    try:
+        token = authorization[7:]
+        from jose import jwt, JWTError
+        from auth import SECRET_KEY, ALGORITHM
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        
+        db_session = db.query(SessionModel).filter(
+            SessionModel.id == session_id,
+            SessionModel.user_id == user.id
+        ).first()
+        
+        if not db_session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Session not found"
+            )
+        
+        generator = TestCaseGenerator()
+        generator.current_thread_id = f"user_{user.id}_session_{session_id}"
+        
+        state = db_session.state_data or {}
+        if not state.get("user_initial_prompt"):
+            state["user_initial_prompt"] = db_session.user_prompt
+        if "session_id" not in state:
+            state["session_id"] = generator.current_thread_id
+        
+        state["l1_clarification_answers"] = answers.answers
+        
+        config = {"configurable": {"thread_id": generator.current_thread_id}}
+        generator.app.update_state(config, state)
+        
+        # Save state immediately before streaming starts
+        db_session.state_data = state
+        db.commit()
+        
+        async def generate():
+            nonlocal state
+            try:
+                import asyncio
+                token_count = 0
+                # Stream L1 test cases generation
+                stream_iter = generator.stream_generate_l1_cases(state)
+                for chunk in stream_iter:
+                    if chunk.get("type") == "token":
+                        token = chunk.get("token", "")
+                        full_text = chunk.get("full_text", "")
+                        yield f"data: {json.dumps({'type': 'token', 'token': token, 'full_text': full_text})}\n\n"
+                        # Flush immediately for real-time streaming
+                        await asyncio.sleep(0)
+                        # Save state periodically (every 10 tokens) to prevent data loss
+                        token_count += 1
+                        if token_count % 10 == 0:
+                            try:
+                                db_session.state_data = state
+                                db.commit()
+                            except Exception as e:
+                                print(f"Error saving state during streaming: {e}")
+                    elif chunk.get("type") == "complete":
+                        test_cases = chunk.get("test_cases", [])
+                        state["l1_test_cases"] = test_cases
+                        
+                        # Update global summary
+                        from testcasegen import update_global_summary
+                        state = update_global_summary(state)
+                        
+                        # Update checkpoint
+                        generator.app.update_state(config, state)
+                        
+                        # Save to database
+                        db_session.state_data = state
+                        db.commit()
+                        
+                        yield f"data: {json.dumps({'type': 'complete', 'state': state})}\n\n"
+            except Exception as e:
+                import traceback
+                error_msg = str(e)
+                traceback.print_exc()
+                # Save state even on error to prevent data loss
+                try:
+                    db_session.state_data = state
+                    db.commit()
+                except Exception as save_error:
+                    print(f"Error saving state on error: {save_error}")
+                yield f"data: {json.dumps({'type': 'error', 'error': error_msg})}\n\n"
+        
+        return StreamingResponse(generate(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        })
+    except HTTPException:
+        raise
+    except JWTError as e:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to submit L1 answers: {str(e)}")
+
+
 @app.post("/api/sessions/{session_id}/l1/answers", response_model=TestCaseStateResponse)
 def submit_l1_answers(
     session_id: int,
@@ -531,6 +782,151 @@ def submit_l1_answers(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to submit L1 answers: {str(e)}")
+
+
+@app.post("/api/sessions/{session_id}/l1/select/stream")
+async def select_l1_case_stream(
+    session_id: int,
+    request: Request,
+    l1_index: Optional[int] = Query(None, alias="l1_index"),
+    db: Session = Depends(get_db)
+):
+    """Select an L1 test case to explore with streaming"""
+    if l1_index is None:
+        query_params = dict(request.query_params)
+        if "l1_index" in query_params:
+            try:
+                l1_index = int(query_params["l1_index"])
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="l1_index must be an integer"
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="l1_index is required"
+            )
+    
+    authorization = request.headers.get("Authorization")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    
+    try:
+        token = authorization[7:]
+        from jose import jwt, JWTError
+        from auth import SECRET_KEY, ALGORITHM
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        
+        db_session = db.query(SessionModel).filter(
+            SessionModel.id == session_id,
+            SessionModel.user_id == user.id
+        ).first()
+        
+        if not db_session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Session not found"
+            )
+        
+        state = db_session.state_data or {}
+        if not state.get("user_initial_prompt"):
+            state["user_initial_prompt"] = db_session.user_prompt
+        
+        l1_cases = state.get("l1_test_cases", [])
+        if l1_index >= len(l1_cases) or l1_index < 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid l1_index. Must be between 0 and {len(l1_cases)-1}"
+            )
+        
+        generator = TestCaseGenerator()
+        generator.current_thread_id = f"user_{user.id}_session_{session_id}"
+        
+        if "session_id" not in state:
+            state["session_id"] = generator.current_thread_id
+        
+        state["selected_l1_case"] = l1_cases[l1_index]
+        state["selected_l1_index"] = l1_index
+        state["l2_clarification_questions"] = []
+        state["l2_clarification_answers"] = {}
+        state["selected_l2_case"] = None
+        state["selected_l2_index"] = None
+        state["l3_clarification_questions"] = []
+        state["l3_clarification_answers"] = {}
+        
+        config = {"configurable": {"thread_id": generator.current_thread_id}}
+        generator.app.update_state(config, state)
+        
+        # Save state immediately before streaming starts
+        db_session.state_data = state
+        db.commit()
+        
+        async def generate():
+            try:
+                import asyncio
+                token_count = 0
+                # Stream L2 questions generation
+                stream_iter = generator.stream_ask_l2_questions(state)
+                for chunk in stream_iter:
+                    if chunk.get("type") == "token":
+                        token = chunk.get("token", "")
+                        full_text = chunk.get("full_text", "")
+                        yield f"data: {json.dumps({'type': 'token', 'token': token, 'full_text': full_text})}\n\n"
+                        # Flush immediately for real-time streaming
+                        await asyncio.sleep(0)
+                        # Save state periodically (every 10 tokens) to prevent data loss
+                        token_count += 1
+                        if token_count % 10 == 0:
+                            try:
+                                db_session.state_data = state
+                                db.commit()
+                            except Exception as e:
+                                print(f"Error saving state during streaming: {e}")
+                    elif chunk.get("type") == "complete":
+                        questions = chunk.get("questions", [])
+                        state["l2_clarification_questions"] = questions
+                        state["current_level"] = "l2"
+                        
+                        # Update checkpoint
+                        generator.app.update_state(config, state)
+                        
+                        # Save to database
+                        db_session.state_data = state
+                        db.commit()
+                        
+                        yield f"data: {json.dumps({'type': 'complete', 'state': state})}\n\n"
+            except Exception as e:
+                import traceback
+                error_msg = str(e)
+                traceback.print_exc()
+                # Save state even on error to prevent data loss
+                try:
+                    db_session.state_data = state
+                    db.commit()
+                except Exception as save_error:
+                    print(f"Error saving state on error: {save_error}")
+                yield f"data: {json.dumps({'type': 'error', 'error': error_msg})}\n\n"
+        
+        return StreamingResponse(generate(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        })
+    except HTTPException:
+        raise
+    except JWTError as e:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to select L1 case: {str(e)}")
 
 
 @app.post("/api/sessions/{session_id}/l1/select")
@@ -665,6 +1061,140 @@ def select_l1_case(
         raise HTTPException(status_code=500, detail=f"Failed to select L1 case: {str(e)}")
 
 
+@app.post("/api/sessions/{session_id}/l2/answers/stream")
+async def submit_l2_answers_stream(
+    session_id: int,
+    answers: QuestionAnswer,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Submit L2 clarification answers with streaming"""
+    authorization = request.headers.get("Authorization")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    
+    try:
+        token = authorization[7:]
+        from jose import jwt, JWTError
+        from auth import SECRET_KEY, ALGORITHM
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        
+        db_session = db.query(SessionModel).filter(
+            SessionModel.id == session_id,
+            SessionModel.user_id == user.id
+        ).first()
+        
+        if not db_session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Session not found"
+            )
+        
+        generator = TestCaseGenerator()
+        generator.current_thread_id = f"user_{user.id}_session_{session_id}"
+        
+        state = db_session.state_data or {}
+        if not state.get("user_initial_prompt"):
+            state["user_initial_prompt"] = db_session.user_prompt
+        if "session_id" not in state:
+            state["session_id"] = generator.current_thread_id
+        
+        state["l2_clarification_answers"] = answers.answers
+        
+        config = {"configurable": {"thread_id": generator.current_thread_id}}
+        generator.app.update_state(config, state)
+        
+        # Save state immediately before streaming starts
+        db_session.state_data = state
+        db.commit()
+        
+        async def generate():
+            nonlocal state
+            try:
+                import asyncio
+                token_count = 0
+                # Stream L2 test cases generation
+                stream_iter = generator.stream_generate_l2_cases(state)
+                for chunk in stream_iter:
+                    if chunk.get("type") == "token":
+                        token = chunk.get("token", "")
+                        full_text = chunk.get("full_text", "")
+                        yield f"data: {json.dumps({'type': 'token', 'token': token, 'full_text': full_text})}\n\n"
+                        # Flush immediately for real-time streaming
+                        await asyncio.sleep(0)
+                        # Save state periodically (every 10 tokens) to prevent data loss
+                        token_count += 1
+                        if token_count % 10 == 0:
+                            try:
+                                db_session.state_data = state
+                                db.commit()
+                            except Exception as e:
+                                print(f"Error saving state during streaming: {e}")
+                    elif chunk.get("type") == "complete":
+                        test_cases = chunk.get("test_cases", [])
+                        existing_l2 = state.get('l2_test_cases', [])
+                        selected_l1 = state.get('selected_l1_case', {})
+                        existing_for_l1 = [tc for tc in existing_l2 if tc.get('parent_l1_id') == selected_l1.get('id')]
+                        if not existing_for_l1:
+                            state['l2_test_cases'] = existing_l2 + test_cases
+                        else:
+                            state['l2_test_cases'] = [tc for tc in existing_l2 if tc.get('parent_l1_id') != selected_l1.get('id')] + test_cases
+                        
+                        # Update global summary
+                        from testcasegen import update_global_summary
+                        state = update_global_summary(state)
+                        
+                        # Clear selection
+                        state['selected_l1_case'] = None
+                        state['selected_l1_index'] = None
+                        state['selected_l2_case'] = None
+                        state['selected_l2_index'] = None
+                        state['l2_clarification_questions'] = []
+                        state['l2_clarification_answers'] = {}
+                        state['l3_clarification_questions'] = []
+                        state['l3_clarification_answers'] = {}
+                        
+                        # Update checkpoint
+                        generator.app.update_state(config, state)
+                        
+                        # Save to database
+                        db_session.state_data = state
+                        db.commit()
+                        
+                        yield f"data: {json.dumps({'type': 'complete', 'state': state})}\n\n"
+            except Exception as e:
+                import traceback
+                error_msg = str(e)
+                traceback.print_exc()
+                # Save state even on error to prevent data loss
+                try:
+                    db_session.state_data = state
+                    db.commit()
+                except Exception as save_error:
+                    print(f"Error saving state on error: {save_error}")
+                yield f"data: {json.dumps({'type': 'error', 'error': error_msg})}\n\n"
+        
+        return StreamingResponse(generate(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        })
+    except HTTPException:
+        raise
+    except JWTError as e:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to submit L2 answers: {str(e)}")
+
+
 @app.post("/api/sessions/{session_id}/l2/answers", response_model=TestCaseStateResponse)
 def submit_l2_answers(
     session_id: int,
@@ -762,6 +1292,147 @@ def submit_l2_answers(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to submit L2 answers: {str(e)}")
+
+
+@app.post("/api/sessions/{session_id}/l2/select/stream")
+async def select_l2_case_stream(
+    session_id: int,
+    request: Request,
+    l2_index: Optional[int] = Query(None, alias="l2_index"),
+    db: Session = Depends(get_db)
+):
+    """Select an L2 test case to explore with streaming"""
+    if l2_index is None:
+        query_params = dict(request.query_params)
+        if "l2_index" in query_params:
+            try:
+                l2_index = int(query_params["l2_index"])
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="l2_index must be an integer"
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="l2_index is required"
+            )
+    
+    authorization = request.headers.get("Authorization")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    
+    try:
+        token = authorization[7:]
+        from jose import jwt, JWTError
+        from auth import SECRET_KEY, ALGORITHM
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        
+        db_session = db.query(SessionModel).filter(
+            SessionModel.id == session_id,
+            SessionModel.user_id == user.id
+        ).first()
+        
+        if not db_session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Session not found"
+            )
+        
+        state = db_session.state_data or {}
+        if not state.get("user_initial_prompt"):
+            state["user_initial_prompt"] = db_session.user_prompt
+        
+        l2_cases = state.get("l2_test_cases", [])
+        if l2_index >= len(l2_cases) or l2_index < 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid l2_index. Must be between 0 and {len(l2_cases)-1}"
+            )
+        
+        generator = TestCaseGenerator()
+        generator.current_thread_id = f"user_{user.id}_session_{session_id}"
+        
+        if "session_id" not in state:
+            state["session_id"] = generator.current_thread_id
+        
+        state["selected_l2_case"] = l2_cases[l2_index]
+        state["selected_l2_index"] = l2_index
+        state["l3_clarification_questions"] = []
+        state["l3_clarification_answers"] = {}
+        
+        config = {"configurable": {"thread_id": generator.current_thread_id}}
+        generator.app.update_state(config, state)
+        
+        # Save state immediately before streaming starts
+        db_session.state_data = state
+        db.commit()
+        
+        async def generate():
+            try:
+                import asyncio
+                token_count = 0
+                # Stream L3 questions generation
+                stream_iter = generator.stream_ask_l3_questions(state)
+                for chunk in stream_iter:
+                    if chunk.get("type") == "token":
+                        token = chunk.get("token", "")
+                        full_text = chunk.get("full_text", "")
+                        yield f"data: {json.dumps({'type': 'token', 'token': token, 'full_text': full_text})}\n\n"
+                        # Flush immediately for real-time streaming
+                        await asyncio.sleep(0)
+                        # Save state periodically (every 10 tokens) to prevent data loss
+                        token_count += 1
+                        if token_count % 10 == 0:
+                            try:
+                                db_session.state_data = state
+                                db.commit()
+                            except Exception as e:
+                                print(f"Error saving state during streaming: {e}")
+                    elif chunk.get("type") == "complete":
+                        questions = chunk.get("questions", [])
+                        state["l3_clarification_questions"] = questions
+                        state["current_level"] = "l3"
+                        
+                        # Update checkpoint
+                        generator.app.update_state(config, state)
+                        
+                        # Save to database
+                        db_session.state_data = state
+                        db.commit()
+                        
+                        yield f"data: {json.dumps({'type': 'complete', 'state': state})}\n\n"
+            except Exception as e:
+                import traceback
+                error_msg = str(e)
+                traceback.print_exc()
+                # Save state even on error to prevent data loss
+                try:
+                    db_session.state_data = state
+                    db.commit()
+                except Exception as save_error:
+                    print(f"Error saving state on error: {save_error}")
+                yield f"data: {json.dumps({'type': 'error', 'error': error_msg})}\n\n"
+        
+        return StreamingResponse(generate(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        })
+    except HTTPException:
+        raise
+    except JWTError as e:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to select L2 case: {str(e)}")
 
 
 @app.post("/api/sessions/{session_id}/l2/select")
@@ -891,6 +1562,134 @@ def select_l2_case(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to select L2 case: {str(e)}")
+
+
+@app.post("/api/sessions/{session_id}/l3/answers/stream")
+async def submit_l3_answers_stream(
+    session_id: int,
+    answers: QuestionAnswer,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Submit L3 clarification answers with streaming"""
+    authorization = request.headers.get("Authorization")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    
+    try:
+        token = authorization[7:]
+        from jose import jwt, JWTError
+        from auth import SECRET_KEY, ALGORITHM
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        
+        db_session = db.query(SessionModel).filter(
+            SessionModel.id == session_id,
+            SessionModel.user_id == user.id
+        ).first()
+        
+        if not db_session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Session not found"
+            )
+        
+        generator = TestCaseGenerator()
+        generator.current_thread_id = f"user_{user.id}_session_{session_id}"
+        
+        state = db_session.state_data or {}
+        if not state.get("user_initial_prompt"):
+            state["user_initial_prompt"] = db_session.user_prompt
+        if "session_id" not in state:
+            state["session_id"] = generator.current_thread_id
+        
+        state["l3_clarification_answers"] = answers.answers
+        
+        config = {"configurable": {"thread_id": generator.current_thread_id}}
+        generator.app.update_state(config, state)
+        
+        # Save state immediately before streaming starts
+        db_session.state_data = state
+        db.commit()
+        
+        async def generate():
+            nonlocal state
+            try:
+                import asyncio
+                token_count = 0
+                # Stream L3 test cases generation
+                stream_iter = generator.stream_generate_l3_cases(state)
+                for chunk in stream_iter:
+                    if chunk.get("type") == "token":
+                        token = chunk.get("token", "")
+                        full_text = chunk.get("full_text", "")
+                        yield f"data: {json.dumps({'type': 'token', 'token': token, 'full_text': full_text})}\n\n"
+                        # Flush immediately for real-time streaming
+                        await asyncio.sleep(0)
+                        # Save state periodically (every 10 tokens) to prevent data loss
+                        token_count += 1
+                        if token_count % 10 == 0:
+                            try:
+                                db_session.state_data = state
+                                db.commit()
+                            except Exception as e:
+                                print(f"Error saving state during streaming: {e}")
+                    elif chunk.get("type") == "complete":
+                        test_cases = chunk.get("test_cases", [])
+                        existing_l3 = state.get('l3_test_cases', [])
+                        selected_l2 = state.get('selected_l2_case', {})
+                        existing_for_l2 = [tc for tc in existing_l3 if tc.get('parent_l2_id') == selected_l2.get('id')]
+                        if not existing_for_l2:
+                            state['l3_test_cases'] = existing_l3 + test_cases
+                        else:
+                            state['l3_test_cases'] = [tc for tc in existing_l3 if tc.get('parent_l2_id') != selected_l2.get('id')] + test_cases
+                        
+                        # Update global summary
+                        from testcasegen import update_global_summary
+                        state = update_global_summary(state)
+                        
+                        # Build tree
+                        from testcasegen import build_tree
+                        state = build_tree(state)
+                        
+                        # Clear selection
+                        state['selected_l2_case'] = None
+                        state['selected_l2_index'] = None
+                        state['l3_clarification_questions'] = []
+                        state['l3_clarification_answers'] = {}
+                        
+                        # Update checkpoint
+                        generator.app.update_state(config, state)
+                        
+                        # Save to database
+                        db_session.state_data = state
+                        db.commit()
+                        
+                        yield f"data: {json.dumps({'type': 'complete', 'state': state})}\n\n"
+            except Exception as e:
+                import traceback
+                error_msg = str(e)
+                traceback.print_exc()
+                yield f"data: {json.dumps({'type': 'error', 'error': error_msg})}\n\n"
+        
+        return StreamingResponse(generate(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        })
+    except HTTPException:
+        raise
+    except JWTError as e:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to submit L3 answers: {str(e)}")
 
 
 @app.post("/api/sessions/{session_id}/l3/answers", response_model=TestCaseStateResponse)

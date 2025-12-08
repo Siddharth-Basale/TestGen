@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import SessionSidebar from '../components/SessionSidebar'
@@ -18,7 +18,11 @@ const Dashboard = () => {
   const [loadingNode, setLoadingNode] = useState(null) // Track which node is loading: 'l1_index' or 'l2_index'
   const [showNewSessionModal, setShowNewSessionModal] = useState(false)
   const [newSessionPrompt, setNewSessionPrompt] = useState('')
-  const [newSessionTitle, setNewSessionTitle] = useState('')
+  const [streamingText, setStreamingText] = useState('')
+  
+  // Lock mechanism to prevent concurrent requests
+  const isGeneratingRef = useRef(false)
+  const eventSourceRef = useRef(null)
 
   useEffect(() => {
     fetchSessions()
@@ -58,7 +62,6 @@ const Dashboard = () => {
     setLoading(true)
     try {
       const response = await api.post('/api/sessions', {
-        title: newSessionTitle || 'New Session',
         user_prompt: newSessionPrompt
       })
       
@@ -67,7 +70,6 @@ const Dashboard = () => {
       setCurrentSession(newSession)
       setShowNewSessionModal(false)
       setNewSessionPrompt('')
-      setNewSessionTitle('')
       
       // Start the session
       await startSession(newSession.id)
@@ -79,13 +81,105 @@ const Dashboard = () => {
     }
   }
 
-  const startSession = async (sessionId) => {
-    try {
-      const response = await api.post(`/api/sessions/${sessionId}/start`)
-      setSessionState(response.data)
-      await fetchSessions()
-    } catch (error) {
-      toast.error('Failed to start session')
+  const startSession = async (sessionId, useStreaming = true) => {
+    if (isGeneratingRef.current) {
+      toast.error('Please wait for current generation to complete')
+      return
+    }
+    
+    if (useStreaming) {
+      // Use streaming endpoint
+      isGeneratingRef.current = true
+      setLoading(true)
+      setStreamingText('')
+      
+      try {
+        const token = localStorage.getItem('token')
+        const response = await fetch(`http://localhost:8000/api/sessions/${sessionId}/start/stream`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+        })
+        
+        if (!response.ok) {
+          throw new Error('Failed to start streaming')
+        }
+        
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        
+        const processStream = async () => {
+          try {
+            while (true) {
+              const { done, value } = await reader.read()
+              if (done) break
+              
+              // Process chunks immediately without waiting for full lines
+              const chunk = decoder.decode(value, { stream: true })
+              buffer += chunk
+              
+              // Process all complete lines immediately
+              let newlineIndex
+              while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+                const line = buffer.slice(0, newlineIndex).trim()
+                buffer = buffer.slice(newlineIndex + 1)
+                
+                if (line && line.startsWith('data: ')) {
+                  try {
+                    const data = JSON.parse(line.slice(6))
+                    
+                    if (data.type === 'token') {
+                      // Update immediately for smooth streaming
+                      setStreamingText(data.full_text || '')
+                    } else if (data.type === 'complete') {
+                      setSessionState(data.state)
+                      setStreamingText('')
+                      isGeneratingRef.current = false
+                      setLoading(false)
+                      await fetchSessions()
+                      toast.success('Session started!')
+                      return
+                    } else if (data.type === 'error') {
+                      toast.error(data.error || 'Failed to start session')
+                      setStreamingText('')
+                      isGeneratingRef.current = false
+                      setLoading(false)
+                      return
+                    }
+                  } catch (error) {
+                    console.error('Error parsing SSE data:', error)
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            console.error('Stream error:', error)
+            isGeneratingRef.current = false
+            setLoading(false)
+            setStreamingText('')
+            toast.error('Stream connection error')
+          }
+        }
+        
+        processStream()
+      } catch (error) {
+        isGeneratingRef.current = false
+        setLoading(false)
+        setStreamingText('')
+        toast.error('Failed to start session')
+      }
+    } else {
+      // Fallback to non-streaming
+      try {
+        const response = await api.post(`/api/sessions/${sessionId}/start`)
+        setSessionState(response.data)
+        await fetchSessions()
+      } catch (error) {
+        toast.error('Failed to start session')
+      }
     }
   }
 
@@ -105,46 +199,243 @@ const Dashboard = () => {
     }
   }
 
-  const handleQuestionSubmit = async (level, answers) => {
+  const handleQuestionSubmit = async (level, answers, useStreaming = true) => {
     if (!currentSession) return
+    
+    if (isGeneratingRef.current) {
+      toast.error('Please wait for current generation to complete')
+      return
+    }
 
-    setLoading(true)
-    try {
-      const response = await api.post(
-        `/api/sessions/${currentSession.id}/${level}/answers`,
-        { answers }
-      )
-      // Merge the new state with existing state to preserve expanded nodes
-      setSessionState(response.data)
-      await fetchSessions()
-      toast.success('Answers submitted!')
-    } catch (error) {
-      toast.error('Failed to submit answers')
-    } finally {
-      setLoading(false)
+    if (useStreaming) {
+      // Use streaming endpoint
+      isGeneratingRef.current = true
+      setLoading(true)
+      setStreamingText('')
+      
+      try {
+        const token = localStorage.getItem('token')
+        const response = await fetch(`http://localhost:8000/api/sessions/${currentSession.id}/${level}/answers/stream`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ answers })
+        })
+        
+        if (!response.ok) {
+          throw new Error('Failed to start streaming')
+        }
+        
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        
+        const processStream = async () => {
+          try {
+            while (true) {
+              const { done, value } = await reader.read()
+              if (done) break
+              
+              // Process chunks immediately without waiting for full lines
+              const chunk = decoder.decode(value, { stream: true })
+              buffer += chunk
+              
+              // Process all complete lines immediately
+              let newlineIndex
+              while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+                const line = buffer.slice(0, newlineIndex).trim()
+                buffer = buffer.slice(newlineIndex + 1)
+                
+                if (line && line.startsWith('data: ')) {
+                  try {
+                    const data = JSON.parse(line.slice(6))
+                    
+                    if (data.type === 'token') {
+                      // Update immediately for smooth streaming
+                      setStreamingText(data.full_text || '')
+                    } else if (data.type === 'complete') {
+                      setSessionState(data.state)
+                      setStreamingText('')
+                      isGeneratingRef.current = false
+                      setLoading(false)
+                      await fetchSessions()
+                      toast.success('Answers submitted!')
+                      return
+                    } else if (data.type === 'error') {
+                      toast.error(data.error || 'Failed to submit answers')
+                      setStreamingText('')
+                      isGeneratingRef.current = false
+                      setLoading(false)
+                      return
+                    }
+                  } catch (error) {
+                    console.error('Error parsing SSE data:', error)
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            console.error('Stream error:', error)
+            isGeneratingRef.current = false
+            setLoading(false)
+            setStreamingText('')
+            toast.error('Stream connection error')
+          }
+        }
+        
+        processStream()
+      } catch (error) {
+        isGeneratingRef.current = false
+        setLoading(false)
+        setStreamingText('')
+        toast.error('Failed to submit answers')
+      }
+    } else {
+      // Fallback to non-streaming
+      setLoading(true)
+      try {
+        const response = await api.post(
+          `/api/sessions/${currentSession.id}/${level}/answers`,
+          { answers }
+        )
+        setSessionState(response.data)
+        await fetchSessions()
+        toast.success('Answers submitted!')
+      } catch (error) {
+        toast.error('Failed to submit answers')
+      } finally {
+        setLoading(false)
+      }
     }
   }
 
-  const handleCaseSelect = async (level, index) => {
+  const handleCaseSelect = async (level, index, useStreaming = true) => {
     if (!currentSession) return
+    
+    if (isGeneratingRef.current) {
+      toast.error('Please wait for current generation to complete')
+      return
+    }
 
     // Set loading for specific node only
     setLoadingNode(`${level}_${index}`)
-    try {
-      const paramName = level === 'l1' ? 'l1_index' : 'l2_index'
-      const response = await api.post(
-        `/api/sessions/${currentSession.id}/${level}/select?${paramName}=${index}`
-      )
-      setSessionState(response.data)
-      await fetchSessions()
-      toast.success('Test case selected!')
-    } catch (error) {
-      console.error('Error selecting case:', error.response?.data || error.message)
-      toast.error(error.response?.data?.detail || 'Failed to select test case')
-    } finally {
-      setLoadingNode(null)
+    
+    if (useStreaming) {
+      // Use streaming endpoint
+      isGeneratingRef.current = true
+      setStreamingText('')
+      
+      try {
+        const token = localStorage.getItem('token')
+        const paramName = level === 'l1' ? 'l1_index' : 'l2_index'
+        const response = await fetch(`http://localhost:8000/api/sessions/${currentSession.id}/${level}/select/stream?${paramName}=${index}`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+        })
+        
+        if (!response.ok) {
+          throw new Error('Failed to start streaming')
+        }
+        
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        
+        const processStream = async () => {
+          try {
+            while (true) {
+              const { done, value } = await reader.read()
+              if (done) break
+              
+              // Process chunks immediately without waiting for full lines
+              const chunk = decoder.decode(value, { stream: true })
+              buffer += chunk
+              
+              // Process all complete lines immediately
+              let newlineIndex
+              while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+                const line = buffer.slice(0, newlineIndex).trim()
+                buffer = buffer.slice(newlineIndex + 1)
+                
+                if (line && line.startsWith('data: ')) {
+                  try {
+                    const data = JSON.parse(line.slice(6))
+                    
+                    if (data.type === 'token') {
+                      // Update immediately for smooth streaming
+                      setStreamingText(data.full_text || '')
+                    } else if (data.type === 'complete') {
+                      setSessionState(data.state)
+                      setStreamingText('')
+                      isGeneratingRef.current = false
+                      setLoadingNode(null)
+                      await fetchSessions()
+                      toast.success('Test case selected!')
+                      return
+                    } else if (data.type === 'error') {
+                      toast.error(data.error || 'Failed to select test case')
+                      setStreamingText('')
+                      isGeneratingRef.current = false
+                      setLoadingNode(null)
+                      return
+                    }
+                  } catch (error) {
+                    console.error('Error parsing SSE data:', error)
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            console.error('Stream error:', error)
+            isGeneratingRef.current = false
+            setLoadingNode(null)
+            setStreamingText('')
+            toast.error('Stream connection error')
+          }
+        }
+        
+        processStream()
+      } catch (error) {
+        console.error('Error selecting case:', error)
+        isGeneratingRef.current = false
+        setLoadingNode(null)
+        setStreamingText('')
+        toast.error(error.message || 'Failed to select test case')
+      }
+    } else {
+      // Fallback to non-streaming
+      try {
+        const paramName = level === 'l1' ? 'l1_index' : 'l2_index'
+        const response = await api.post(
+          `/api/sessions/${currentSession.id}/${level}/select?${paramName}=${index}`
+        )
+        setSessionState(response.data)
+        await fetchSessions()
+        toast.success('Test case selected!')
+      } catch (error) {
+        console.error('Error selecting case:', error.response?.data || error.message)
+        toast.error(error.response?.data?.detail || 'Failed to select test case')
+      } finally {
+        setLoadingNode(null)
+      }
     }
   }
+  
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close()
+        eventSourceRef.current = null
+      }
+      isGeneratingRef.current = false
+    }
+  }, [])
 
   const getCurrentLevel = () => {
     if (!sessionState) return null
@@ -232,9 +523,10 @@ const Dashboard = () => {
                 <p className="text-gray-500">Starting session...</p>
                 <button
                   onClick={() => startSession(currentSession.id)}
-                  className="mt-4 px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+                  disabled={isGeneratingRef.current}
+                  className="mt-4 px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Start Session
+                  {isGeneratingRef.current ? 'Generating...' : 'Start Session'}
                 </button>
               </div>
             </div>
@@ -248,12 +540,24 @@ const Dashboard = () => {
                 <p className="text-sm text-gray-600">{currentSession.user_prompt}</p>
               </div>
 
+              {/* Streaming Display */}
+              {streamingText && (
+                <div className="bg-white rounded-lg shadow p-4 mb-4">
+                  <h3 className="text-sm font-semibold text-gray-700 mb-2">Generating...</h3>
+                  <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 max-h-48 overflow-y-auto">
+                    <pre className="text-xs text-gray-700 whitespace-pre-wrap font-mono">
+                      {streamingText}
+                    </pre>
+                  </div>
+                </div>
+              )}
+
               {/* Questions Form - Show when questions are available */}
               {currentLevel === 'l1_questions' && (
                 <QuestionForm
                   questions={sessionState.l1_clarification_questions || []}
                   onSubmit={(answers) => handleQuestionSubmit('l1', answers)}
-                  loading={loading}
+                  loading={loading || isGeneratingRef.current}
                 />
               )}
 
@@ -261,7 +565,7 @@ const Dashboard = () => {
                 <QuestionForm
                   questions={sessionState.l2_clarification_questions || []}
                   onSubmit={(answers) => handleQuestionSubmit('l2', answers)}
-                  loading={loading}
+                  loading={loading || isGeneratingRef.current}
                 />
               )}
 
@@ -269,7 +573,7 @@ const Dashboard = () => {
                 <QuestionForm
                   questions={sessionState.l3_clarification_questions || []}
                   onSubmit={(answers) => handleQuestionSubmit('l3', answers)}
-                  loading={loading}
+                  loading={loading || isGeneratingRef.current}
                 />
               )}
 
@@ -295,18 +599,6 @@ const Dashboard = () => {
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Session Title (optional)
-                </label>
-                <input
-                  type="text"
-                  value={newSessionTitle}
-                  onChange={(e) => setNewSessionTitle(e.target.value)}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                  placeholder="My Test Case Session"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
                   Business Description *
                 </label>
                 <textarea
@@ -317,6 +609,9 @@ const Dashboard = () => {
                   placeholder="Describe your business, software systems, workflows, etc..."
                   required
                 />
+                <p className="text-xs text-gray-500 mt-1">
+                  A session title will be automatically generated from your description
+                </p>
               </div>
             </div>
             <div className="flex gap-4 mt-6">
@@ -331,7 +626,6 @@ const Dashboard = () => {
                 onClick={() => {
                   setShowNewSessionModal(false)
                   setNewSessionPrompt('')
-                  setNewSessionTitle('')
                 }}
                 className="flex-1 bg-gray-200 text-gray-700 py-2 rounded-lg hover:bg-gray-300 transition"
               >

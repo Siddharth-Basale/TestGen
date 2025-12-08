@@ -3,7 +3,7 @@ Test Case Generation System using LangGraph
 Generates hierarchical test cases (L1, L2, L3) based on business requirements
 """
 
-from typing import TypedDict, Annotated, Literal, Optional, List, Dict, Any
+from typing import TypedDict, Annotated, Literal, Optional, List, Dict, Any, Iterator
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -11,7 +11,8 @@ from langchain_openai import ChatOpenAI
 import operator
 import json
 from dotenv import load_dotenv
-import os 
+import os
+import asyncio 
 
 load_dotenv()
 openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -67,7 +68,71 @@ def get_llm():
         model="gpt-4",
         temperature=0.7,
         api_key=openai_api_key,
+        streaming=True,  # Enable streaming
+        model_kwargs={"stream_options": {"include_usage": False}},  # Optimize streaming
     )
+
+
+def stream_llm_response(messages: List, callback=None) -> Iterator[str]:
+    """
+    Stream LLM response token by token
+    
+    Args:
+        messages: List of messages to send to LLM
+        callback: Optional callback function that receives (token, full_text) for each token
+    
+    Yields:
+        Token strings as they arrive
+    """
+    llm = get_llm()
+    full_text = ""
+    
+    try:
+        for chunk in llm.stream(messages):
+            if chunk.content:
+                token = chunk.content
+                full_text += token
+                if callback:
+                    callback(token, full_text)
+                yield token
+    except Exception as e:
+        print(f"Error in stream_llm_response: {e}")
+        yield ""
+
+
+def generate_session_title(business_description: str) -> str:
+    """Generate a concise, descriptive title from the business description"""
+    llm = get_llm()
+    
+    prompt = f"""
+    Based on the following business description, generate a concise and descriptive session title (maximum 60 characters).
+    The title should capture the main focus or domain of the business/system described.
+    
+    Business Description:
+    {business_description}
+    
+    Return ONLY the title text, nothing else. No quotes, no explanation, just the title.
+    """
+    
+    messages = [
+        SystemMessage(content="You are a helpful assistant that generates concise, descriptive titles."),
+        HumanMessage(content=prompt)
+    ]
+    
+    try:
+        response = llm.invoke(messages)
+        title = response.content.strip()
+        # Remove quotes if present
+        title = title.strip('"').strip("'")
+        # Limit to 60 characters
+        if len(title) > 60:
+            title = title[:57] + "..."
+        return title if title else "New Session"
+    except Exception as e:
+        print(f"Error generating title: {e}")
+        # Fallback: use first 60 characters of description
+        fallback = business_description.strip()[:60]
+        return fallback if fallback else "New Session"
 
 
 # ============================================================================
@@ -1315,6 +1380,495 @@ class TestCaseGenerator:
         """
         state = self.get_current_state(session_id)
         return state.get("full_tree_data", {})
+    
+    # ============================================================================
+    # STREAMING METHODS
+    # ============================================================================
+    
+    def stream_ask_l1_questions(self, state: TestCaseState) -> Iterator[Dict[str, Any]]:
+        """Stream L1 questions generation"""
+        llm = get_llm()
+        global_summary = state.get('global_summary', "")
+        
+        prompt = f"""
+        You are a test case generation expert. A user has provided the following business description:
+        
+        {state['user_initial_prompt']}
+        
+        Context from Previous Answers:
+        {global_summary if global_summary else "No previous context available."}
+        
+        Generate 3-5 optional clarification questions that would help you understand:
+        1. The software systems they're using
+        2. Key business processes
+        3. Critical workflows
+        4. Integration points
+        
+        Use the context to avoid duplicate questions and build upon existing knowledge.
+        These questions should help generate comprehensive L1 (high-level) test cases.
+        
+        For each question, also provide 3-5 suggested answer options that users might commonly select.
+        
+        Return ONLY a JSON array of objects, each with:
+        - "question": the question string
+        - "suggested_answers": array of 3-5 suggested answer strings
+        
+        Example format:
+        [
+            {{"question": "What are the main software systems you use?", "suggested_answers": ["ERP System", "CRM Platform", "Custom Web Application", "Mobile App", "Database System"]}},
+            {{"question": "What are your critical business workflows?", "suggested_answers": ["Order Processing", "Customer Onboarding", "Payment Processing", "Inventory Management", "Reporting"]}}
+        ]
+        """
+        
+        messages = [
+            SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON."),
+            HumanMessage(content=prompt)
+        ]
+        
+        full_text = ""
+        for chunk in llm.stream(messages):
+            if chunk.content:
+                token = chunk.content
+                full_text += token
+                yield {"type": "token", "token": token, "full_text": full_text}
+        
+        # Parse and yield final result
+        try:
+            questions_data = json.loads(full_text)
+            if not isinstance(questions_data, list):
+                questions_data = [questions_data]
+            
+            questions = []
+            for item in questions_data:
+                if isinstance(item, dict) and 'question' in item:
+                    questions.append({
+                        'question': item['question'],
+                        'suggested_answers': item.get('suggested_answers', [])
+                    })
+                elif isinstance(item, str):
+                    questions.append({
+                        'question': item,
+                        'suggested_answers': []
+                    })
+        except:
+            questions = [
+                {"question": "What are the main software systems you use?", "suggested_answers": ["ERP System", "CRM Platform", "Custom Web Application"]},
+                {"question": "What are your critical business workflows?", "suggested_answers": ["Order Processing", "Customer Onboarding", "Payment Processing"]},
+            ]
+        
+        yield {"type": "complete", "questions": questions}
+    
+    def stream_generate_l1_cases(self, state: TestCaseState) -> Iterator[Dict[str, Any]]:
+        """Stream L1 test cases generation"""
+        llm = get_llm()
+        
+        answers_text = ""
+        if state.get('l1_clarification_answers'):
+            answers_text = "\n".join([f"Q: {k}\nA: {v}" for k, v in state['l1_clarification_answers'].items()])
+        
+        global_summary = state.get('global_summary', "")
+        
+        prompt = f"""
+        You are a test case generation expert. Based on the following information, generate L1 (high-level) test cases.
+        
+        Business Description:
+        {state['user_initial_prompt']}
+        
+        Context from Previous Answers:
+        {global_summary if global_summary else "No previous context available."}
+        
+        Clarification Answers:
+        {answers_text if answers_text else "No additional clarifications provided."}
+        
+        Generate 5-10 comprehensive L1 test cases. Each test case should:
+        - Be high-level and cover major business functionality
+        - Have a clear title/name
+        - Include a brief description
+        - Be independent and testable
+        
+        Return ONLY a JSON array of objects, each with:
+        - "id": unique identifier (e.g., "L1_001")
+        - "title": test case title
+        - "description": brief description
+        
+        Example format:
+        [
+            {{"id": "L1_001", "title": "User Authentication", "description": "Test user login and authentication flows"}},
+            {{"id": "L1_002", "title": "Data Processing", "description": "Test core data processing workflows"}}
+        ]
+        """
+        
+        messages = [
+            SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON arrays."),
+            HumanMessage(content=prompt)
+        ]
+        
+        full_text = ""
+        for chunk in llm.stream(messages):
+            if chunk.content:
+                token = chunk.content
+                full_text += token
+                yield {"type": "token", "token": token, "full_text": full_text}
+        
+        # Parse and yield final result
+        try:
+            test_cases = json.loads(full_text)
+            if not isinstance(test_cases, list):
+                test_cases = [test_cases]
+        except:
+            test_cases = [
+                {"id": "L1_001", "title": "Core Functionality Test", "description": "Test core business functionality"},
+                {"id": "L1_002", "title": "Integration Test", "description": "Test system integrations"}
+            ]
+        
+        yield {"type": "complete", "test_cases": test_cases}
+    
+    def stream_ask_l2_questions(self, state: TestCaseState) -> Iterator[Dict[str, Any]]:
+        """Stream L2 questions generation"""
+        llm = get_llm()
+        selected_l1 = state.get('selected_l1_case')
+        if not selected_l1:
+            yield {"type": "complete", "questions": []}
+            return
+        
+        global_summary = state.get('global_summary', "")
+        
+        prompt = f"""
+        You are a test case generation expert. A user has selected the following L1 test case to explore further:
+        
+        L1 Test Case:
+        ID: {selected_l1.get('id', 'N/A')}
+        Title: {selected_l1.get('title', 'N/A')}
+        Description: {selected_l1.get('description', 'N/A')}
+        
+        Original Business Context:
+        {state['user_initial_prompt']}
+        
+        Context from All Previous Answers:
+        {global_summary if global_summary else "No previous context available."}
+        
+        Generate 3-5 optional clarification questions that would help you understand this specific L1 test case in more detail.
+        These questions should help generate comprehensive L2 (mid-level) test cases.
+        Use the context to avoid asking duplicate questions and to build upon existing knowledge.
+        
+        For each question, also provide 3-5 suggested answer options that users might commonly select.
+        
+        Return ONLY a JSON array of objects, each with:
+        - "question": the question string
+        - "suggested_answers": array of 3-5 suggested answer strings
+        """
+        
+        messages = [
+            SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON."),
+            HumanMessage(content=prompt)
+        ]
+        
+        full_text = ""
+        for chunk in llm.stream(messages):
+            if chunk.content:
+                token = chunk.content
+                full_text += token
+                yield {"type": "token", "token": token, "full_text": full_text}
+        
+        # Parse and yield final result
+        try:
+            questions_data = json.loads(full_text)
+            if not isinstance(questions_data, list):
+                questions_data = [questions_data]
+            
+            questions = []
+            for item in questions_data:
+                if isinstance(item, dict) and 'question' in item:
+                    questions.append({
+                        'question': item['question'],
+                        'suggested_answers': item.get('suggested_answers', [])
+                    })
+                elif isinstance(item, str):
+                    questions.append({
+                        'question': item,
+                        'suggested_answers': []
+                    })
+        except:
+            questions = [
+                {"question": f"What are the specific scenarios for {selected_l1.get('title', 'this functionality')}?", "suggested_answers": ["Happy Path", "Error Handling", "Edge Cases"]},
+            ]
+        
+        yield {"type": "complete", "questions": questions}
+    
+    def stream_generate_l2_cases(self, state: TestCaseState) -> Iterator[Dict[str, Any]]:
+        """Stream L2 test cases generation"""
+        llm = get_llm()
+        selected_l1 = state.get('selected_l1_case')
+        if not selected_l1:
+            yield {"type": "complete", "test_cases": []}
+            return
+        
+        l2_questions = state.get('l2_clarification_questions', [])
+        l2_answers = state.get('l2_clarification_answers', {})
+        answered_q_and_a = []
+        for q in l2_questions:
+            question_text = q.get('question', str(q)) if isinstance(q, dict) else str(q)
+            if question_text in l2_answers and l2_answers[question_text].strip():
+                answered_q_and_a.append(f"Q: {question_text}\nA: {l2_answers[question_text]}")
+        
+        answers_text = "\n".join(answered_q_and_a) if answered_q_and_a else ""
+        global_summary = state.get('global_summary', "")
+        
+        prompt = f"""
+        You are a test case generation expert. Generate L2 (mid-level) test cases for the selected L1 test case.
+        
+        Original Business Context:
+        {state['user_initial_prompt']}
+        
+        Selected L1 Test Case:
+        ID: {selected_l1.get('id', 'N/A')}
+        Title: {selected_l1.get('title', 'N/A')}
+        Description: {selected_l1.get('description', 'N/A')}
+        
+        Context from All Previous Answers:
+        {global_summary if global_summary else "No previous context available."}
+        
+        Current Clarification Answers:
+        {answers_text if answers_text else "No additional clarifications provided."}
+        
+        Generate 5-8 L2 test cases that break down the selected L1 test case into more specific scenarios.
+        Use the context to ensure variety and avoid duplication.
+        Each L2 test case should:
+        - Be more specific than L1 but still cover significant functionality
+        - Have a clear title/name
+        - Include a brief description
+        - Reference the parent L1 case
+        
+        Return ONLY a JSON array of objects, each with:
+        - "id": unique identifier (e.g., "L2_001")
+        - "title": test case title
+        - "description": brief description
+        - "parent_l1_id": the ID of the parent L1 case
+        """
+        
+        messages = [
+            SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON arrays."),
+            HumanMessage(content=prompt)
+        ]
+        
+        full_text = ""
+        for chunk in llm.stream(messages):
+            if chunk.content:
+                token = chunk.content
+                full_text += token
+                yield {"type": "token", "token": token, "full_text": full_text}
+        
+        # Parse and yield final result
+        try:
+            test_cases = json.loads(full_text)
+            if not isinstance(test_cases, list):
+                test_cases = [test_cases]
+            for tc in test_cases:
+                if 'parent_l1_id' not in tc:
+                    tc['parent_l1_id'] = selected_l1.get('id', 'L1_001')
+        except:
+            test_cases = [
+                {"id": "L2_001", "title": "Basic Scenario", "description": "Test basic scenario", "parent_l1_id": selected_l1.get('id', 'L1_001')},
+            ]
+        
+        yield {"type": "complete", "test_cases": test_cases}
+    
+    def stream_ask_l3_questions(self, state: TestCaseState) -> Iterator[Dict[str, Any]]:
+        """Stream L3 questions generation"""
+        llm = get_llm()
+        selected_l2 = state.get('selected_l2_case')
+        if not selected_l2:
+            yield {"type": "complete", "questions": []}
+            return
+        
+        selected_l1 = state.get('selected_l1_case') or {}
+        parent_l1_id = selected_l2.get('parent_l1_id')
+        if parent_l1_id:
+            l1_cases = state.get('l1_test_cases', [])
+            parent_l1 = next((l1 for l1 in l1_cases if l1.get('id') == parent_l1_id), {})
+            if parent_l1:
+                selected_l1 = parent_l1
+        
+        global_summary = state.get('global_summary', "")
+        
+        prompt = f"""
+        You are a test case generation expert. A user has selected the following L2 test case to explore further:
+        
+        Parent L1 Test Case:
+        ID: {selected_l1.get('id', 'N/A')}
+        Title: {selected_l1.get('title', 'N/A')}
+        
+        Selected L2 Test Case:
+        ID: {selected_l2.get('id', 'N/A')}
+        Title: {selected_l2.get('title', 'N/A')}
+        Description: {selected_l2.get('description', 'N/A')}
+        
+        Original Business Context:
+        {state['user_initial_prompt']}
+        
+        Context from All Previous Answers:
+        {global_summary if global_summary else "No previous context available."}
+        
+        Generate 3-5 optional clarification questions that would help you understand this specific L2 test case in more detail.
+        These questions should help generate comprehensive L3 (detailed-level) test cases.
+        Use the context to avoid asking duplicate questions and to build upon existing knowledge.
+        
+        For each question, also provide 3-5 suggested answer options that users might commonly select.
+        
+        Return ONLY a JSON array of objects, each with:
+        - "question": the question string
+        - "suggested_answers": array of 3-5 suggested answer strings
+        """
+        
+        messages = [
+            SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON."),
+            HumanMessage(content=prompt)
+        ]
+        
+        full_text = ""
+        for chunk in llm.stream(messages):
+            if chunk.content:
+                token = chunk.content
+                full_text += token
+                yield {"type": "token", "token": token, "full_text": full_text}
+        
+        # Parse and yield final result
+        try:
+            questions_data = json.loads(full_text)
+            if not isinstance(questions_data, list):
+                questions_data = [questions_data]
+            
+            questions = []
+            for item in questions_data:
+                if isinstance(item, dict) and 'question' in item:
+                    questions.append({
+                        'question': item['question'],
+                        'suggested_answers': item.get('suggested_answers', [])
+                    })
+                elif isinstance(item, str):
+                    questions.append({
+                        'question': item,
+                        'suggested_answers': []
+                    })
+        except:
+            questions = [
+                {"question": f"What are the specific test steps for {selected_l2.get('title', 'this scenario')}?", "suggested_answers": ["Setup", "Execute", "Verify", "Cleanup"]},
+            ]
+        
+        yield {"type": "complete", "questions": questions}
+    
+    def stream_generate_l3_cases(self, state: TestCaseState) -> Iterator[Dict[str, Any]]:
+        """Stream L3 test cases generation"""
+        llm = get_llm()
+        selected_l2 = state.get('selected_l2_case')
+        if not selected_l2:
+            yield {"type": "complete", "test_cases": []}
+            return
+        
+        selected_l1 = state.get('selected_l1_case') or {}
+        parent_l1_id = selected_l2.get('parent_l1_id')
+        if parent_l1_id:
+            l1_cases = state.get('l1_test_cases', [])
+            parent_l1 = next((l1 for l1 in l1_cases if l1.get('id') == parent_l1_id), {})
+            if parent_l1:
+                selected_l1 = parent_l1
+        
+        l2_questions = state.get('l2_clarification_questions', [])
+        l2_answers = state.get('l2_clarification_answers', {})
+        l3_questions = state.get('l3_clarification_questions', [])
+        l3_answers = state.get('l3_clarification_answers', {})
+        
+        l2_answers_text = ""
+        if l2_answers and l2_questions:
+            for q in l2_questions:
+                question_text = q.get('question', str(q)) if isinstance(q, dict) else str(q)
+                if question_text in l2_answers and l2_answers[question_text].strip():
+                    l2_answers_text += f"Q: {question_text}\nA: {l2_answers[question_text]}\n"
+        
+        l3_answers_text = ""
+        if l3_answers and l3_questions:
+            for q in l3_questions:
+                question_text = q.get('question', str(q)) if isinstance(q, dict) else str(q)
+                if question_text in l3_answers and l3_answers[question_text].strip():
+                    l3_answers_text += f"Q: {question_text}\nA: {l3_answers[question_text]}\n"
+        
+        global_summary = state.get('global_summary', "")
+        
+        prompt = f"""
+        You are a test case generation expert. Generate L3 (detailed-level) test cases for the selected L2 test case.
+        
+        Original Business Context:
+        {state['user_initial_prompt']}
+        
+        Parent L1 Test Case:
+        ID: {selected_l1.get('id', 'N/A')}
+        Title: {selected_l1.get('title', 'N/A')}
+        
+        Selected L2 Test Case:
+        ID: {selected_l2.get('id', 'N/A')}
+        Title: {selected_l2.get('title', 'N/A')}
+        Description: {selected_l2.get('description', 'N/A')}
+        
+        Context from All Previous Answers:
+        {global_summary if global_summary else "No previous context available."}
+        
+        Current L2 Clarification Answers:
+        {l2_answers_text if l2_answers_text else "No L2 answers were provided."}
+        
+        Current L3 Clarification Answers:
+        {l3_answers_text if l3_answers_text else "No L3 answers were provided."}
+        
+        Generate 5-10 detailed L3 test cases that break down the selected L2 test case into specific, executable test scenarios.
+        Use all the context from previous answers and current answers to generate comprehensive and relevant test cases.
+        Each L3 test case should:
+        - Be very specific and detailed
+        - Include test steps or scenarios
+        - Have clear expected results
+        - Reference the parent L2 case
+        - Consider the context from all previous questions and answers
+        
+        Return ONLY a JSON array of objects, each with:
+        - "id": unique identifier (e.g., "L3_001")
+        - "title": test case title
+        - "description": detailed description
+        - "test_steps": array of test steps (optional)
+        - "expected_result": expected result (optional)
+        - "parent_l2_id": the ID of the parent L2 case
+        """
+        
+        messages = [
+            SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON arrays."),
+            HumanMessage(content=prompt)
+        ]
+        
+        full_text = ""
+        for chunk in llm.stream(messages):
+            if chunk.content:
+                token = chunk.content
+                full_text += token
+                yield {"type": "token", "token": token, "full_text": full_text}
+        
+        # Parse and yield final result
+        try:
+            test_cases = json.loads(full_text)
+            if not isinstance(test_cases, list):
+                test_cases = [test_cases]
+            for tc in test_cases:
+                if 'parent_l2_id' not in tc:
+                    tc['parent_l2_id'] = selected_l2.get('id', 'L2_001')
+        except:
+            test_cases = [
+                {
+                    "id": "L3_001",
+                    "title": "Detailed Test Case 1",
+                    "description": "Test detailed scenario 1",
+                    "test_steps": ["Step 1", "Step 2"],
+                    "expected_result": "Expected result",
+                    "parent_l2_id": selected_l2.get('id', 'L2_001')
+                }
+            ]
+        
+        yield {"type": "complete", "test_cases": test_cases}
 
 
 # ============================================================================
