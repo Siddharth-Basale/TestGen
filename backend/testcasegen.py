@@ -65,7 +65,7 @@ class TestCaseState(TypedDict):
 def get_llm():
     """Initialize the LLM (adjust model and API key as needed)"""
     return ChatOpenAI(
-        model="gpt-4",
+        model="gpt-4o-mini",
         temperature=0.7,
         api_key=openai_api_key,
         streaming=True,  # Enable streaming
@@ -149,38 +149,36 @@ def ask_l1_questions(state: TestCaseState) -> TestCaseState:
     # Get global summary
     global_summary = state.get('global_summary', "")
     
-    prompt = f"""
-    You are a test case generation expert. A user has provided the following business description:
-    
-    {state['user_initial_prompt']}
-    
-    Context from Previous Answers:
-    {global_summary if global_summary else "No previous context available."}
-    
-    Generate 3-5 optional clarification questions that would help you understand:
-    1. The software systems they're using
-    2. Key business processes
-    3. Critical workflows
-    4. Integration points
-    
-    Use the context to avoid duplicate questions and build upon existing knowledge.
-    These questions should help generate comprehensive L1 (high-level) test cases.
-    
-    For each question, also provide 3-5 suggested answer options that users might commonly select.
-    
-    Return ONLY a JSON array of objects, each with:
-    - "question": the question string
-    - "suggested_answers": array of 3-5 suggested answer strings
-    
-    Example format:
-    [
-        {{"question": "What are the main software systems you use?", "suggested_answers": ["ERP System", "CRM Platform", "Custom Web Application", "Mobile App", "Database System"]}},
-        {{"question": "What are your critical business workflows?", "suggested_answers": ["Order Processing", "Customer Onboarding", "Payment Processing", "Inventory Management", "Reporting"]}}
-    ]
-    """
+    prompt = f"""TASK: Generate clarification questions for test case generation.
+
+BUSINESS DESCRIPTION:
+{state['user_initial_prompt']}
+
+CONTEXT FROM PREVIOUS ANSWERS:
+{global_summary if global_summary else "No previous context available."}
+
+INSTRUCTIONS:
+1. Generate exactly 3-5 clarification questions
+2. Focus on: software systems, business processes, critical workflows, integration points
+3. Avoid duplicate questions based on the context provided
+4. Each question must have exactly 3-5 suggested answer options
+
+REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
+[
+    {{"question": "Question text here?", "suggested_answers": ["Option 1", "Option 2", "Option 3", "Option 4", "Option 5"]}},
+    {{"question": "Another question?", "suggested_answers": ["Option A", "Option B", "Option C"]}}
+]
+
+CRITICAL: 
+- Output ONLY valid JSON array
+- Start with [ and end with ]
+- Each object must have "question" (string) and "suggested_answers" (array of strings)
+- No explanatory text before or after the JSON
+- No markdown code blocks
+- No backticks"""
     
     messages = [
-        SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON."),
+        SystemMessage(content="You are a JSON-only output assistant. You MUST return ONLY valid JSON arrays. Never include markdown, explanations, or any text outside the JSON structure. Your response must start with [ and end with ]."),
         HumanMessage(content=prompt)
     ]
     
@@ -263,38 +261,40 @@ def generate_l1_cases(state: TestCaseState) -> TestCaseState:
     # Get global summary
     global_summary = state.get('global_summary', "")
     
-    prompt = f"""
-    You are a test case generation expert. Based on the following information, generate L1 (high-level) test cases.
-    
-    Business Description:
-    {state['user_initial_prompt']}
-    
-    Context from Previous Answers:
-    {global_summary if global_summary else "No previous context available."}
-    
-    Clarification Answers:
-    {answers_text if answers_text else "No additional clarifications provided."}
-    
-    Generate 5-10 comprehensive L1 test cases. Each test case should:
-    - Be high-level and cover major business functionality
-    - Have a clear title/name
-    - Include a brief description
-    - Be independent and testable
-    
-    Return ONLY a JSON array of objects, each with:
-    - "id": unique identifier (e.g., "L1_001")
-    - "title": test case title
-    - "description": brief description
-    
-    Example format:
-    [
-        {{"id": "L1_001", "title": "User Authentication", "description": "Test user login and authentication flows"}},
-        {{"id": "L1_002", "title": "Data Processing", "description": "Test core data processing workflows"}}
-    ]
-    """
+    prompt = f"""TASK: Generate L1 (high-level) test cases.
+
+BUSINESS DESCRIPTION:
+{state['user_initial_prompt']}
+
+CONTEXT FROM PREVIOUS ANSWERS:
+{global_summary if global_summary else "No previous context available."}
+
+CLARIFICATION ANSWERS:
+{answers_text if answers_text else "No additional clarifications provided."}
+
+INSTRUCTIONS:
+1. Generate exactly 5-10 L1 test cases
+2. Each test case must be high-level and cover major business functionality
+3. Each test case must be independent and testable
+4. Use sequential IDs starting from L1_001
+
+REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
+[
+    {{"id": "L1_001", "title": "User Authentication", "description": "Test user login and authentication flows"}},
+    {{"id": "L1_002", "title": "Data Processing", "description": "Test core data processing workflows"}},
+    {{"id": "L1_003", "title": "System Integration", "description": "Test integration between systems"}}
+]
+
+CRITICAL:
+- Output ONLY valid JSON array
+- Start with [ and end with ]
+- Each object must have: "id" (string like "L1_001"), "title" (string), "description" (string)
+- No explanatory text before or after the JSON
+- No markdown code blocks
+- No backticks"""
     
     messages = [
-        SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON arrays."),
+        SystemMessage(content="You are a JSON-only output assistant. You MUST return ONLY valid JSON arrays. Never include markdown, explanations, or any text outside the JSON structure. Your response must start with [ and end with ]."),
         HumanMessage(content=prompt)
     ]
     
@@ -452,39 +452,41 @@ def ask_l2_questions(state: TestCaseState) -> TestCaseState:
         print("  No previous context available.")
     print("=" * 80 + "\n")
     
-    prompt = f"""
-    You are a test case generation expert. A user has selected the following L1 test case to explore further:
-    
-    L1 Test Case:
-    ID: {selected_l1.get('id', 'N/A')}
-    Title: {selected_l1.get('title', 'N/A')}
-    Description: {selected_l1.get('description', 'N/A')}
-    
-    Original Business Context:
-    {state['user_initial_prompt']}
-    
-    Context from All Previous Answers:
-    {global_summary if global_summary else "No previous context available."}
-    
-    Generate 3-5 optional clarification questions that would help you understand this specific L1 test case in more detail.
-    These questions should help generate comprehensive L2 (mid-level) test cases.
-    Use the context to avoid asking duplicate questions and to build upon existing knowledge.
-    
-    For each question, also provide 3-5 suggested answer options that users might commonly select.
-    
-    Return ONLY a JSON array of objects, each with:
-    - "question": the question string
-    - "suggested_answers": array of 3-5 suggested answer strings
-    
-    Example format:
-    [
-        {{"question": "What are the specific scenarios for this functionality?", "suggested_answers": ["Happy Path", "Error Handling", "Edge Cases", "Performance", "Security"]}},
-        {{"question": "What are the integration points?", "suggested_answers": ["API Calls", "Database Access", "External Services", "File System", "Message Queue"]}}
-    ]
-    """
+    prompt = f"""TASK: Generate clarification questions for L2 test case generation.
+
+SELECTED L1 TEST CASE:
+ID: {selected_l1.get('id', 'N/A')}
+Title: {selected_l1.get('title', 'N/A')}
+Description: {selected_l1.get('description', 'N/A')}
+
+ORIGINAL BUSINESS CONTEXT:
+{state['user_initial_prompt']}
+
+CONTEXT FROM ALL PREVIOUS ANSWERS:
+{global_summary if global_summary else "No previous context available."}
+
+INSTRUCTIONS:
+1. Generate exactly 3-5 clarification questions specific to this L1 test case
+2. Questions should help generate L2 (mid-level) test cases
+3. Avoid duplicate questions based on the context provided
+4. Each question must have exactly 3-5 suggested answer options
+
+REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
+[
+    {{"question": "What are the specific scenarios for this functionality?", "suggested_answers": ["Happy Path", "Error Handling", "Edge Cases", "Performance", "Security"]}},
+    {{"question": "What are the integration points?", "suggested_answers": ["API Calls", "Database Access", "External Services", "File System", "Message Queue"]}}
+]
+
+CRITICAL:
+- Output ONLY valid JSON array
+- Start with [ and end with ]
+- Each object must have "question" (string) and "suggested_answers" (array of strings)
+- No explanatory text before or after the JSON
+- No markdown code blocks
+- No backticks"""
     
     messages = [
-        SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON."),
+        SystemMessage(content="You are a JSON-only output assistant. You MUST return ONLY valid JSON arrays. Never include markdown, explanations, or any text outside the JSON structure. Your response must start with [ and end with ]."),
         HumanMessage(content=prompt)
     ]
     
@@ -555,46 +557,46 @@ def generate_l2_cases(state: TestCaseState) -> TestCaseState:
     # Get global summary
     global_summary = state.get('global_summary', "")
     
-    prompt = f"""
-    You are a test case generation expert. Generate L2 (mid-level) test cases for the selected L1 test case.
-    
-    Original Business Context:
-    {state['user_initial_prompt']}
-    
-    Selected L1 Test Case:
-    ID: {selected_l1.get('id', 'N/A')}
-    Title: {selected_l1.get('title', 'N/A')}
-    Description: {selected_l1.get('description', 'N/A')}
-    
-    Context from All Previous Answers:
-    {global_summary if global_summary else "No previous context available."}
-    
-    Current Clarification Answers:
-    {answers_text if answers_text else "No additional clarifications provided."}
-    
-    Generate 5-8 L2 test cases that break down the selected L1 test case into more specific scenarios.
-    Use the context to ensure variety and avoid duplication.
-    Each L2 test case should:
-    - Be more specific than L1 but still cover significant functionality
-    - Have a clear title/name
-    - Include a brief description
-    - Reference the parent L1 case
-    
-    Return ONLY a JSON array of objects, each with:
-    - "id": unique identifier (e.g., "L2_001")
-    - "title": test case title
-    - "description": brief description
-    - "parent_l1_id": the ID of the parent L1 case
-    
-    Example format:
-    [
-        {{"id": "L2_001", "title": "Login with Valid Credentials", "description": "Test successful login", "parent_l1_id": "L1_001"}},
-        {{"id": "L2_002", "title": "Login with Invalid Credentials", "description": "Test login failure scenarios", "parent_l1_id": "L1_001"}}
-    ]
-    """
+    prompt = f"""TASK: Generate L2 (mid-level) test cases for the selected L1 test case.
+
+ORIGINAL BUSINESS CONTEXT:
+{state['user_initial_prompt']}
+
+SELECTED L1 TEST CASE:
+ID: {selected_l1.get('id', 'N/A')}
+Title: {selected_l1.get('title', 'N/A')}
+Description: {selected_l1.get('description', 'N/A')}
+
+CONTEXT FROM ALL PREVIOUS ANSWERS:
+{global_summary if global_summary else "No previous context available."}
+
+CURRENT CLARIFICATION ANSWERS:
+{answers_text if answers_text else "No additional clarifications provided."}
+
+INSTRUCTIONS:
+1. Generate exactly 5-8 L2 test cases that break down the selected L1 test case
+2. Each L2 test case must be more specific than L1 but still cover significant functionality
+3. Use sequential IDs starting from L2_001
+4. Each test case must reference the parent L1 case ID: {selected_l1.get('id', 'L1_001')}
+5. Ensure variety and avoid duplication based on context
+
+REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
+[
+    {{"id": "L2_001", "title": "Login with Valid Credentials", "description": "Test successful login", "parent_l1_id": "{selected_l1.get('id', 'L1_001')}"}},
+    {{"id": "L2_002", "title": "Login with Invalid Credentials", "description": "Test login failure scenarios", "parent_l1_id": "{selected_l1.get('id', 'L1_001')}"}}
+]
+
+CRITICAL:
+- Output ONLY valid JSON array
+- Start with [ and end with ]
+- Each object must have: "id" (string like "L2_001"), "title" (string), "description" (string), "parent_l1_id" (string)
+- parent_l1_id must be exactly: "{selected_l1.get('id', 'L1_001')}"
+- No explanatory text before or after the JSON
+- No markdown code blocks
+- No backticks"""
     
     messages = [
-        SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON arrays."),
+        SystemMessage(content="You are a JSON-only output assistant. You MUST return ONLY valid JSON arrays. Never include markdown, explanations, or any text outside the JSON structure. Your response must start with [ and end with ]."),
         HumanMessage(content=prompt)
     ]
     
@@ -682,43 +684,45 @@ def ask_l3_questions(state: TestCaseState) -> TestCaseState:
         print("  No previous context available.")
     print("=" * 80 + "\n")
     
-    prompt = f"""
-    You are a test case generation expert. A user has selected the following L2 test case to explore further:
-    
-    Parent L1 Test Case:
-    ID: {selected_l1.get('id', 'N/A')}
-    Title: {selected_l1.get('title', 'N/A')}
-    
-    Selected L2 Test Case:
-    ID: {selected_l2.get('id', 'N/A')}
-    Title: {selected_l2.get('title', 'N/A')}
-    Description: {selected_l2.get('description', 'N/A')}
-    
-    Original Business Context:
-    {state['user_initial_prompt']}
-    
-    Context from All Previous Answers:
-    {global_summary if global_summary else "No previous context available."}
-    
-    Generate 3-5 optional clarification questions that would help you understand this specific L2 test case in more detail.
-    These questions should help generate comprehensive L3 (detailed-level) test cases.
-    Use the context to avoid asking duplicate questions and to build upon existing knowledge.
-    
-    For each question, also provide 3-5 suggested answer options that users might commonly select.
-    
-    Return ONLY a JSON array of objects, each with:
-    - "question": the question string
-    - "suggested_answers": array of 3-5 suggested answer strings
-    
-    Example format:
-    [
-        {{"question": "What are the specific test steps?", "suggested_answers": ["Setup", "Execute", "Verify", "Cleanup", "Document"]}},
-        {{"question": "What are the expected results?", "suggested_answers": ["Success", "Failure", "Partial Success", "Timeout", "Error"]}}
-    ]
-    """
+    prompt = f"""TASK: Generate clarification questions for L3 test case generation.
+
+PARENT L1 TEST CASE:
+ID: {selected_l1.get('id', 'N/A')}
+Title: {selected_l1.get('title', 'N/A')}
+
+SELECTED L2 TEST CASE:
+ID: {selected_l2.get('id', 'N/A')}
+Title: {selected_l2.get('title', 'N/A')}
+Description: {selected_l2.get('description', 'N/A')}
+
+ORIGINAL BUSINESS CONTEXT:
+{state['user_initial_prompt']}
+
+CONTEXT FROM ALL PREVIOUS ANSWERS:
+{global_summary if global_summary else "No previous context available."}
+
+INSTRUCTIONS:
+1. Generate exactly 3-5 clarification questions specific to this L2 test case
+2. Questions should help generate L3 (detailed-level) test cases
+3. Avoid duplicate questions based on the context provided
+4. Each question must have exactly 3-5 suggested answer options
+
+REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
+[
+    {{"question": "What are the specific test steps?", "suggested_answers": ["Setup", "Execute", "Verify", "Cleanup", "Document"]}},
+    {{"question": "What are the expected results?", "suggested_answers": ["Success", "Failure", "Partial Success", "Timeout", "Error"]}}
+]
+
+CRITICAL:
+- Output ONLY valid JSON array
+- Start with [ and end with ]
+- Each object must have "question" (string) and "suggested_answers" (array of strings)
+- No explanatory text before or after the JSON
+- No markdown code blocks
+- No backticks"""
     
     messages = [
-        SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON."),
+        SystemMessage(content="You are a JSON-only output assistant. You MUST return ONLY valid JSON arrays. Never include markdown, explanations, or any text outside the JSON structure. Your response must start with [ and end with ]."),
         HumanMessage(content=prompt)
     ]
     
@@ -825,62 +829,69 @@ def generate_l3_cases(state: TestCaseState) -> TestCaseState:
     # Get global summary
     global_summary = state.get('global_summary', "")
     
-    prompt = f"""
-    You are a test case generation expert. Generate L3 (detailed-level) test cases for the selected L2 test case.
-    
-    Original Business Context:
-    {state['user_initial_prompt']}
-    
-    Parent L1 Test Case:
-    ID: {selected_l1.get('id', 'N/A')}
-    Title: {selected_l1.get('title', 'N/A')}
-    
-    Selected L2 Test Case:
-    ID: {selected_l2.get('id', 'N/A')}
-    Title: {selected_l2.get('title', 'N/A')}
-    Description: {selected_l2.get('description', 'N/A')}
-    
-    Context from All Previous Answers:
-    {global_summary if global_summary else "No previous context available."}
-    
-    Current L2 Clarification Answers:
-    {l2_answers_text if l2_answers_text else "No L2 answers were provided."}
-    
-    Current L3 Clarification Answers:
-    {l3_answers_text if l3_answers_text else "No L3 answers were provided."}
-    
-    Generate 5-10 detailed L3 test cases that break down the selected L2 test case into specific, executable test scenarios.
-    Use all the context from previous answers and current answers to generate comprehensive and relevant test cases.
-    Each L3 test case should:
-    - Be very specific and detailed
-    - Include test steps or scenarios
-    - Have clear expected results
-    - Reference the parent L2 case
-    - Consider the context from all previous questions and answers
-    
-    Return ONLY a JSON array of objects, each with:
-    - "id": unique identifier (e.g., "L3_001")
-    - "title": test case title
-    - "description": detailed description
-    - "test_steps": array of test steps (optional)
-    - "expected_result": expected result (optional)
-    - "parent_l2_id": the ID of the parent L2 case
-    
-    Example format:
-    [
-        {{
-            "id": "L3_001",
-            "title": "Valid Email Login",
-            "description": "Test login with valid email and password",
-            "test_steps": ["Navigate to login page", "Enter valid email", "Enter valid password", "Click login"],
-            "expected_result": "User is successfully logged in",
-            "parent_l2_id": "L2_001"
-        }}
-    ]
-    """
+    prompt = f"""TASK: Generate L3 (detailed-level) test cases for the selected L2 test case.
+
+ORIGINAL BUSINESS CONTEXT:
+{state['user_initial_prompt']}
+
+PARENT L1 TEST CASE:
+ID: {selected_l1.get('id', 'N/A')}
+Title: {selected_l1.get('title', 'N/A')}
+
+SELECTED L2 TEST CASE:
+ID: {selected_l2.get('id', 'N/A')}
+Title: {selected_l2.get('title', 'N/A')}
+Description: {selected_l2.get('description', 'N/A')}
+
+CONTEXT FROM ALL PREVIOUS ANSWERS:
+{global_summary if global_summary else "No previous context available."}
+
+CURRENT L2 CLARIFICATION ANSWERS:
+{l2_answers_text if l2_answers_text else "No L2 answers were provided."}
+
+CURRENT L3 CLARIFICATION ANSWERS:
+{l3_answers_text if l3_answers_text else "No L3 answers were provided."}
+
+INSTRUCTIONS:
+1. Generate exactly 5-10 detailed L3 test cases
+2. Each test case must be very specific and detailed
+3. Each test case must include test_steps (array of strings) and expected_result (string)
+4. Use sequential IDs starting from L3_001
+5. Each test case must reference the parent L2 case ID: {selected_l2.get('id', 'L2_001')}
+6. Use all context from previous and current answers
+
+REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
+[
+    {{
+        "id": "L3_001",
+        "title": "Valid Email Login",
+        "description": "Test login with valid email and password",
+        "test_steps": ["Navigate to login page", "Enter valid email", "Enter valid password", "Click login"],
+        "expected_result": "User is successfully logged in",
+        "parent_l2_id": "{selected_l2.get('id', 'L2_001')}"
+    }},
+    {{
+        "id": "L3_002",
+        "title": "Invalid Password Login",
+        "description": "Test login with invalid password",
+        "test_steps": ["Navigate to login page", "Enter valid email", "Enter invalid password", "Click login"],
+        "expected_result": "Error message displayed: Invalid credentials",
+        "parent_l2_id": "{selected_l2.get('id', 'L2_001')}"
+    }}
+]
+
+CRITICAL:
+- Output ONLY valid JSON array
+- Start with [ and end with ]
+- Each object must have: "id" (string like "L3_001"), "title" (string), "description" (string), "test_steps" (array of strings), "expected_result" (string), "parent_l2_id" (string)
+- parent_l2_id must be exactly: "{selected_l2.get('id', 'L2_001')}"
+- test_steps must be an array, even if empty: []
+- No explanatory text before or after the JSON
+- No markdown code blocks
+- No backticks"""
     
     messages = [
-        SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON arrays."),
+        SystemMessage(content="You are a JSON-only output assistant. You MUST return ONLY valid JSON arrays. Never include markdown, explanations, or any text outside the JSON structure. Your response must start with [ and end with ]."),
         HumanMessage(content=prompt)
     ]
     
@@ -1390,38 +1401,36 @@ class TestCaseGenerator:
         llm = get_llm()
         global_summary = state.get('global_summary', "")
         
-        prompt = f"""
-        You are a test case generation expert. A user has provided the following business description:
-        
-        {state['user_initial_prompt']}
-        
-        Context from Previous Answers:
-        {global_summary if global_summary else "No previous context available."}
-        
-        Generate 3-5 optional clarification questions that would help you understand:
-        1. The software systems they're using
-        2. Key business processes
-        3. Critical workflows
-        4. Integration points
-        
-        Use the context to avoid duplicate questions and build upon existing knowledge.
-        These questions should help generate comprehensive L1 (high-level) test cases.
-        
-        For each question, also provide 3-5 suggested answer options that users might commonly select.
-        
-        Return ONLY a JSON array of objects, each with:
-        - "question": the question string
-        - "suggested_answers": array of 3-5 suggested answer strings
-        
-        Example format:
-        [
-            {{"question": "What are the main software systems you use?", "suggested_answers": ["ERP System", "CRM Platform", "Custom Web Application", "Mobile App", "Database System"]}},
-            {{"question": "What are your critical business workflows?", "suggested_answers": ["Order Processing", "Customer Onboarding", "Payment Processing", "Inventory Management", "Reporting"]}}
-        ]
-        """
+        prompt = f"""TASK: Generate clarification questions for test case generation.
+
+BUSINESS DESCRIPTION:
+{state['user_initial_prompt']}
+
+CONTEXT FROM PREVIOUS ANSWERS:
+{global_summary if global_summary else "No previous context available."}
+
+INSTRUCTIONS:
+1. Generate exactly 3-5 clarification questions
+2. Focus on: software systems, business processes, critical workflows, integration points
+3. Avoid duplicate questions based on the context provided
+4. Each question must have exactly 3-5 suggested answer options
+
+REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
+[
+    {{"question": "Question text here?", "suggested_answers": ["Option 1", "Option 2", "Option 3", "Option 4", "Option 5"]}},
+    {{"question": "Another question?", "suggested_answers": ["Option A", "Option B", "Option C"]}}
+]
+
+CRITICAL: 
+- Output ONLY valid JSON array
+- Start with [ and end with ]
+- Each object must have "question" (string) and "suggested_answers" (array of strings)
+- No explanatory text before or after the JSON
+- No markdown code blocks
+- No backticks"""
         
         messages = [
-            SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON."),
+            SystemMessage(content="You are a JSON-only output assistant. You MUST return ONLY valid JSON arrays. Never include markdown, explanations, or any text outside the JSON structure. Your response must start with [ and end with ]."),
             HumanMessage(content=prompt)
         ]
         
@@ -1468,38 +1477,40 @@ class TestCaseGenerator:
         
         global_summary = state.get('global_summary', "")
         
-        prompt = f"""
-        You are a test case generation expert. Based on the following information, generate L1 (high-level) test cases.
-        
-        Business Description:
-        {state['user_initial_prompt']}
-        
-        Context from Previous Answers:
-        {global_summary if global_summary else "No previous context available."}
-        
-        Clarification Answers:
-        {answers_text if answers_text else "No additional clarifications provided."}
-        
-        Generate 5-10 comprehensive L1 test cases. Each test case should:
-        - Be high-level and cover major business functionality
-        - Have a clear title/name
-        - Include a brief description
-        - Be independent and testable
-        
-        Return ONLY a JSON array of objects, each with:
-        - "id": unique identifier (e.g., "L1_001")
-        - "title": test case title
-        - "description": brief description
-        
-        Example format:
-        [
-            {{"id": "L1_001", "title": "User Authentication", "description": "Test user login and authentication flows"}},
-            {{"id": "L1_002", "title": "Data Processing", "description": "Test core data processing workflows"}}
-        ]
-        """
+        prompt = f"""TASK: Generate L1 (high-level) test cases.
+
+BUSINESS DESCRIPTION:
+{state['user_initial_prompt']}
+
+CONTEXT FROM PREVIOUS ANSWERS:
+{global_summary if global_summary else "No previous context available."}
+
+CLARIFICATION ANSWERS:
+{answers_text if answers_text else "No additional clarifications provided."}
+
+INSTRUCTIONS:
+1. Generate exactly 5-10 L1 test cases
+2. Each test case must be high-level and cover major business functionality
+3. Each test case must be independent and testable
+4. Use sequential IDs starting from L1_001
+
+REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
+[
+    {{"id": "L1_001", "title": "User Authentication", "description": "Test user login and authentication flows"}},
+    {{"id": "L1_002", "title": "Data Processing", "description": "Test core data processing workflows"}},
+    {{"id": "L1_003", "title": "System Integration", "description": "Test integration between systems"}}
+]
+
+CRITICAL:
+- Output ONLY valid JSON array
+- Start with [ and end with ]
+- Each object must have: "id" (string like "L1_001"), "title" (string), "description" (string)
+- No explanatory text before or after the JSON
+- No markdown code blocks
+- No backticks"""
         
         messages = [
-            SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON arrays."),
+            SystemMessage(content="You are a JSON-only output assistant. You MUST return ONLY valid JSON arrays. Never include markdown, explanations, or any text outside the JSON structure. Your response must start with [ and end with ]."),
             HumanMessage(content=prompt)
         ]
         
@@ -1533,33 +1544,41 @@ class TestCaseGenerator:
         
         global_summary = state.get('global_summary', "")
         
-        prompt = f"""
-        You are a test case generation expert. A user has selected the following L1 test case to explore further:
-        
-        L1 Test Case:
-        ID: {selected_l1.get('id', 'N/A')}
-        Title: {selected_l1.get('title', 'N/A')}
-        Description: {selected_l1.get('description', 'N/A')}
-        
-        Original Business Context:
-        {state['user_initial_prompt']}
-        
-        Context from All Previous Answers:
-        {global_summary if global_summary else "No previous context available."}
-        
-        Generate 3-5 optional clarification questions that would help you understand this specific L1 test case in more detail.
-        These questions should help generate comprehensive L2 (mid-level) test cases.
-        Use the context to avoid asking duplicate questions and to build upon existing knowledge.
-        
-        For each question, also provide 3-5 suggested answer options that users might commonly select.
-        
-        Return ONLY a JSON array of objects, each with:
-        - "question": the question string
-        - "suggested_answers": array of 3-5 suggested answer strings
-        """
+        prompt = f"""TASK: Generate clarification questions for L2 test case generation.
+
+SELECTED L1 TEST CASE:
+ID: {selected_l1.get('id', 'N/A')}
+Title: {selected_l1.get('title', 'N/A')}
+Description: {selected_l1.get('description', 'N/A')}
+
+ORIGINAL BUSINESS CONTEXT:
+{state['user_initial_prompt']}
+
+CONTEXT FROM ALL PREVIOUS ANSWERS:
+{global_summary if global_summary else "No previous context available."}
+
+INSTRUCTIONS:
+1. Generate exactly 3-5 clarification questions specific to this L1 test case
+2. Questions should help generate L2 (mid-level) test cases
+3. Avoid duplicate questions based on the context provided
+4. Each question must have exactly 3-5 suggested answer options
+
+REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
+[
+    {{"question": "What are the specific scenarios for this functionality?", "suggested_answers": ["Happy Path", "Error Handling", "Edge Cases", "Performance", "Security"]}},
+    {{"question": "What are the integration points?", "suggested_answers": ["API Calls", "Database Access", "External Services", "File System", "Message Queue"]}}
+]
+
+CRITICAL:
+- Output ONLY valid JSON array
+- Start with [ and end with ]
+- Each object must have "question" (string) and "suggested_answers" (array of strings)
+- No explanatory text before or after the JSON
+- No markdown code blocks
+- No backticks"""
         
         messages = [
-            SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON."),
+            SystemMessage(content="You are a JSON-only output assistant. You MUST return ONLY valid JSON arrays. Never include markdown, explanations, or any text outside the JSON structure. Your response must start with [ and end with ]."),
             HumanMessage(content=prompt)
         ]
         
@@ -1614,40 +1633,46 @@ class TestCaseGenerator:
         answers_text = "\n".join(answered_q_and_a) if answered_q_and_a else ""
         global_summary = state.get('global_summary', "")
         
-        prompt = f"""
-        You are a test case generation expert. Generate L2 (mid-level) test cases for the selected L1 test case.
-        
-        Original Business Context:
-        {state['user_initial_prompt']}
-        
-        Selected L1 Test Case:
-        ID: {selected_l1.get('id', 'N/A')}
-        Title: {selected_l1.get('title', 'N/A')}
-        Description: {selected_l1.get('description', 'N/A')}
-        
-        Context from All Previous Answers:
-        {global_summary if global_summary else "No previous context available."}
-        
-        Current Clarification Answers:
-        {answers_text if answers_text else "No additional clarifications provided."}
-        
-        Generate 5-8 L2 test cases that break down the selected L1 test case into more specific scenarios.
-        Use the context to ensure variety and avoid duplication.
-        Each L2 test case should:
-        - Be more specific than L1 but still cover significant functionality
-        - Have a clear title/name
-        - Include a brief description
-        - Reference the parent L1 case
-        
-        Return ONLY a JSON array of objects, each with:
-        - "id": unique identifier (e.g., "L2_001")
-        - "title": test case title
-        - "description": brief description
-        - "parent_l1_id": the ID of the parent L1 case
-        """
+        prompt = f"""TASK: Generate L2 (mid-level) test cases for the selected L1 test case.
+
+ORIGINAL BUSINESS CONTEXT:
+{state['user_initial_prompt']}
+
+SELECTED L1 TEST CASE:
+ID: {selected_l1.get('id', 'N/A')}
+Title: {selected_l1.get('title', 'N/A')}
+Description: {selected_l1.get('description', 'N/A')}
+
+CONTEXT FROM ALL PREVIOUS ANSWERS:
+{global_summary if global_summary else "No previous context available."}
+
+CURRENT CLARIFICATION ANSWERS:
+{answers_text if answers_text else "No additional clarifications provided."}
+
+INSTRUCTIONS:
+1. Generate exactly 5-8 L2 test cases that break down the selected L1 test case
+2. Each L2 test case must be more specific than L1 but still cover significant functionality
+3. Use sequential IDs starting from L2_001
+4. Each test case must reference the parent L1 case ID: {selected_l1.get('id', 'L1_001')}
+5. Ensure variety and avoid duplication based on context
+
+REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
+[
+    {{"id": "L2_001", "title": "Login with Valid Credentials", "description": "Test successful login", "parent_l1_id": "{selected_l1.get('id', 'L1_001')}"}},
+    {{"id": "L2_002", "title": "Login with Invalid Credentials", "description": "Test login failure scenarios", "parent_l1_id": "{selected_l1.get('id', 'L1_001')}"}}
+]
+
+CRITICAL:
+- Output ONLY valid JSON array
+- Start with [ and end with ]
+- Each object must have: "id" (string like "L2_001"), "title" (string), "description" (string), "parent_l1_id" (string)
+- parent_l1_id must be exactly: "{selected_l1.get('id', 'L1_001')}"
+- No explanatory text before or after the JSON
+- No markdown code blocks
+- No backticks"""
         
         messages = [
-            SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON arrays."),
+            SystemMessage(content="You are a JSON-only output assistant. You MUST return ONLY valid JSON arrays. Never include markdown, explanations, or any text outside the JSON structure. Your response must start with [ and end with ]."),
             HumanMessage(content=prompt)
         ]
         
@@ -1691,37 +1716,45 @@ class TestCaseGenerator:
         
         global_summary = state.get('global_summary', "")
         
-        prompt = f"""
-        You are a test case generation expert. A user has selected the following L2 test case to explore further:
-        
-        Parent L1 Test Case:
-        ID: {selected_l1.get('id', 'N/A')}
-        Title: {selected_l1.get('title', 'N/A')}
-        
-        Selected L2 Test Case:
-        ID: {selected_l2.get('id', 'N/A')}
-        Title: {selected_l2.get('title', 'N/A')}
-        Description: {selected_l2.get('description', 'N/A')}
-        
-        Original Business Context:
-        {state['user_initial_prompt']}
-        
-        Context from All Previous Answers:
-        {global_summary if global_summary else "No previous context available."}
-        
-        Generate 3-5 optional clarification questions that would help you understand this specific L2 test case in more detail.
-        These questions should help generate comprehensive L3 (detailed-level) test cases.
-        Use the context to avoid asking duplicate questions and to build upon existing knowledge.
-        
-        For each question, also provide 3-5 suggested answer options that users might commonly select.
-        
-        Return ONLY a JSON array of objects, each with:
-        - "question": the question string
-        - "suggested_answers": array of 3-5 suggested answer strings
-        """
+        prompt = f"""TASK: Generate clarification questions for L3 test case generation.
+
+PARENT L1 TEST CASE:
+ID: {selected_l1.get('id', 'N/A')}
+Title: {selected_l1.get('title', 'N/A')}
+
+SELECTED L2 TEST CASE:
+ID: {selected_l2.get('id', 'N/A')}
+Title: {selected_l2.get('title', 'N/A')}
+Description: {selected_l2.get('description', 'N/A')}
+
+ORIGINAL BUSINESS CONTEXT:
+{state['user_initial_prompt']}
+
+CONTEXT FROM ALL PREVIOUS ANSWERS:
+{global_summary if global_summary else "No previous context available."}
+
+INSTRUCTIONS:
+1. Generate exactly 3-5 clarification questions specific to this L2 test case
+2. Questions should help generate L3 (detailed-level) test cases
+3. Avoid duplicate questions based on the context provided
+4. Each question must have exactly 3-5 suggested answer options
+
+REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
+[
+    {{"question": "What are the specific test steps?", "suggested_answers": ["Setup", "Execute", "Verify", "Cleanup", "Document"]}},
+    {{"question": "What are the expected results?", "suggested_answers": ["Success", "Failure", "Partial Success", "Timeout", "Error"]}}
+]
+
+CRITICAL:
+- Output ONLY valid JSON array
+- Start with [ and end with ]
+- Each object must have "question" (string) and "suggested_answers" (array of strings)
+- No explanatory text before or after the JSON
+- No markdown code blocks
+- No backticks"""
         
         messages = [
-            SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON."),
+            SystemMessage(content="You are a JSON-only output assistant. You MUST return ONLY valid JSON arrays. Never include markdown, explanations, or any text outside the JSON structure. Your response must start with [ and end with ]."),
             HumanMessage(content=prompt)
         ]
         
@@ -1794,50 +1827,69 @@ class TestCaseGenerator:
         
         global_summary = state.get('global_summary', "")
         
-        prompt = f"""
-        You are a test case generation expert. Generate L3 (detailed-level) test cases for the selected L2 test case.
-        
-        Original Business Context:
-        {state['user_initial_prompt']}
-        
-        Parent L1 Test Case:
-        ID: {selected_l1.get('id', 'N/A')}
-        Title: {selected_l1.get('title', 'N/A')}
-        
-        Selected L2 Test Case:
-        ID: {selected_l2.get('id', 'N/A')}
-        Title: {selected_l2.get('title', 'N/A')}
-        Description: {selected_l2.get('description', 'N/A')}
-        
-        Context from All Previous Answers:
-        {global_summary if global_summary else "No previous context available."}
-        
-        Current L2 Clarification Answers:
-        {l2_answers_text if l2_answers_text else "No L2 answers were provided."}
-        
-        Current L3 Clarification Answers:
-        {l3_answers_text if l3_answers_text else "No L3 answers were provided."}
-        
-        Generate 5-10 detailed L3 test cases that break down the selected L2 test case into specific, executable test scenarios.
-        Use all the context from previous answers and current answers to generate comprehensive and relevant test cases.
-        Each L3 test case should:
-        - Be very specific and detailed
-        - Include test steps or scenarios
-        - Have clear expected results
-        - Reference the parent L2 case
-        - Consider the context from all previous questions and answers
-        
-        Return ONLY a JSON array of objects, each with:
-        - "id": unique identifier (e.g., "L3_001")
-        - "title": test case title
-        - "description": detailed description
-        - "test_steps": array of test steps (optional)
-        - "expected_result": expected result (optional)
-        - "parent_l2_id": the ID of the parent L2 case
-        """
+        prompt = f"""TASK: Generate L3 (detailed-level) test cases for the selected L2 test case.
+
+ORIGINAL BUSINESS CONTEXT:
+{state['user_initial_prompt']}
+
+PARENT L1 TEST CASE:
+ID: {selected_l1.get('id', 'N/A')}
+Title: {selected_l1.get('title', 'N/A')}
+
+SELECTED L2 TEST CASE:
+ID: {selected_l2.get('id', 'N/A')}
+Title: {selected_l2.get('title', 'N/A')}
+Description: {selected_l2.get('description', 'N/A')}
+
+CONTEXT FROM ALL PREVIOUS ANSWERS:
+{global_summary if global_summary else "No previous context available."}
+
+CURRENT L2 CLARIFICATION ANSWERS:
+{l2_answers_text if l2_answers_text else "No L2 answers were provided."}
+
+CURRENT L3 CLARIFICATION ANSWERS:
+{l3_answers_text if l3_answers_text else "No L3 answers were provided."}
+
+INSTRUCTIONS:
+1. Generate exactly 5-10 detailed L3 test cases
+2. Each test case must be very specific and detailed
+3. Each test case must include test_steps (array of strings) and expected_result (string)
+4. Use sequential IDs starting from L3_001
+5. Each test case must reference the parent L2 case ID: {selected_l2.get('id', 'L2_001')}
+6. Use all context from previous and current answers
+
+REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
+[
+    {{
+        "id": "L3_001",
+        "title": "Valid Email Login",
+        "description": "Test login with valid email and password",
+        "test_steps": ["Navigate to login page", "Enter valid email", "Enter valid password", "Click login"],
+        "expected_result": "User is successfully logged in",
+        "parent_l2_id": "{selected_l2.get('id', 'L2_001')}"
+    }},
+    {{
+        "id": "L3_002",
+        "title": "Invalid Password Login",
+        "description": "Test login with invalid password",
+        "test_steps": ["Navigate to login page", "Enter valid email", "Enter invalid password", "Click login"],
+        "expected_result": "Error message displayed: Invalid credentials",
+        "parent_l2_id": "{selected_l2.get('id', 'L2_001')}"
+    }}
+]
+
+CRITICAL:
+- Output ONLY valid JSON array
+- Start with [ and end with ]
+- Each object must have: "id" (string like "L3_001"), "title" (string), "description" (string), "test_steps" (array of strings), "expected_result" (string), "parent_l2_id" (string)
+- parent_l2_id must be exactly: "{selected_l2.get('id', 'L2_001')}"
+- test_steps must be an array, even if empty: []
+- No explanatory text before or after the JSON
+- No markdown code blocks
+- No backticks"""
         
         messages = [
-            SystemMessage(content="You are a helpful test case generation assistant. Always return valid JSON arrays."),
+            SystemMessage(content="You are a JSON-only output assistant. You MUST return ONLY valid JSON arrays. Never include markdown, explanations, or any text outside the JSON structure. Your response must start with [ and end with ]."),
             HumanMessage(content=prompt)
         ]
         

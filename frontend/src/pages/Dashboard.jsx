@@ -584,6 +584,7 @@ const Dashboard = () => {
                   onSelectCase={handleCaseSelect}
                   loading={loading}
                   loadingNode={loadingNode}
+                  sessionId={currentSession?.id}
                 />
               )}
             </div>

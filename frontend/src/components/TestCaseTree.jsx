@@ -1,9 +1,18 @@
-import { useState, memo } from 'react'
-import { ChevronRight, ChevronDown, Circle } from 'lucide-react'
+import { useState, useEffect, memo } from 'react'
+import { ChevronRight, ChevronDown, Circle, Image, Loader2 } from 'lucide-react'
+import { generatePlantUMLDiagram, getSessionDiagrams } from '../services/api'
+import toast from 'react-hot-toast'
+import PlantUMLDiagramModal from './PlantUMLDiagramModal'
 
-const TestCaseTree = ({ sessionState, onSelectCase, loading, loadingNode }) => {
+const TestCaseTree = ({ sessionState, onSelectCase, loading, loadingNode, sessionId }) => {
   const [expandedNodes, setExpandedNodes] = useState(new Set())
   const [selectedNode, setSelectedNode] = useState(null)
+  const [generatingDiagram, setGeneratingDiagram] = useState(null) // Track which diagram is generating: 'l1_id' or 'l2_id'
+  const [diagrams, setDiagrams] = useState({}) // Store diagram IDs: { 'l1_id': diagramId, 'l2_id': diagramId }
+  const [modalOpen, setModalOpen] = useState(false)
+  const [currentDiagramId, setCurrentDiagramId] = useState(null)
+  const [currentDiagramType, setCurrentDiagramType] = useState(null)
+  const [currentTestCaseId, setCurrentTestCaseId] = useState(null)
   
   // Preserve expanded state across re-renders by using a ref-like approach
   // The Set in useState already preserves state, so we're good there
@@ -18,6 +27,87 @@ const TestCaseTree = ({ sessionState, onSelectCase, loading, loadingNode }) => {
     setExpandedNodes(newExpanded)
   }
 
+  // Load diagrams when session changes
+  useEffect(() => {
+    if (sessionId) {
+      loadDiagrams()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, sessionState?.l3_test_cases])
+
+  const loadDiagrams = async () => {
+    if (!sessionId) return
+    try {
+      const response = await getSessionDiagrams(sessionId)
+      const diagramsMap = {}
+      response.data.forEach(diagram => {
+        diagramsMap[diagram.test_case_id] = diagram.id
+      })
+      setDiagrams(diagramsMap)
+    } catch (error) {
+      console.error('Error loading diagrams:', error)
+    }
+  }
+
+  // Check if L1 case has all L2 cases with L3 cases
+  const l1HasAllL2WithL3 = (l1Case) => {
+    const l2Cases = sessionState.l2_test_cases?.filter(l2 => l2.parent_l1_id === l1Case.id) || []
+    if (l2Cases.length === 0) return false
+    
+    // Check if all L2 cases have at least one L3 case
+    return l2Cases.every(l2 => {
+      const l3Count = sessionState.l3_test_cases?.filter(l3 => l3.parent_l2_id === l2.id).length || 0
+      return l3Count > 0
+    })
+  }
+
+  // Check if L2 case has L3 cases
+  const l2HasL3 = (l2Case) => {
+    const l3Count = sessionState.l3_test_cases?.filter(l3 => l3.parent_l2_id === l2Case.id).length || 0
+    return l3Count > 0
+  }
+
+  const handleGenerateDiagram = async (testCaseId, testCaseTitle, diagramType) => {
+    if (!sessionId) {
+      toast.error('Session not found')
+      return
+    }
+
+    setGeneratingDiagram(testCaseId)
+    try {
+      const response = await generatePlantUMLDiagram(
+        sessionId,
+        testCaseId,
+        diagramType,
+        testCaseTitle
+      )
+      
+      const diagramId = response.data.id
+      setDiagrams(prev => ({ ...prev, [testCaseId]: diagramId }))
+      toast.success('Diagram generated successfully!')
+      
+      // Open modal to show the diagram
+      setCurrentDiagramId(diagramId)
+      setCurrentDiagramType(diagramType)
+      setCurrentTestCaseId(testCaseId)
+      setModalOpen(true)
+    } catch (error) {
+      console.error('Error generating diagram:', error)
+      toast.error(error.response?.data?.detail || 'Failed to generate diagram')
+    } finally {
+      setGeneratingDiagram(null)
+    }
+  }
+
+  const handleViewDiagram = (testCaseId) => {
+    const diagramId = diagrams[testCaseId]
+    if (diagramId) {
+      setCurrentDiagramId(diagramId)
+      setCurrentDiagramType(sessionState.l1_test_cases?.some(l1 => l1.id === testCaseId) ? 'l1' : 'l2')
+      setCurrentTestCaseId(testCaseId)
+      setModalOpen(true)
+    }
+  }
 
   if (!sessionState) {
     return null
@@ -123,6 +213,39 @@ const TestCaseTree = ({ sessionState, onSelectCase, loading, loadingNode }) => {
                         Generating...
                       </span>
                     )}
+                    {/* Generate Diagram Button for L1 */}
+                    {!isLoading && l1HasAllL2WithL3(l1Case) && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          if (diagrams[l1Case.id]) {
+                            handleViewDiagram(l1Case.id)
+                          } else {
+                            handleGenerateDiagram(l1Case.id, l1Case.title, 'l1')
+                          }
+                        }}
+                        disabled={generatingDiagram === l1Case.id}
+                        className="ml-2 px-3 py-1.5 text-xs bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 transition"
+                        title={diagrams[l1Case.id] ? 'View Diagram' : 'Generate Diagram'}
+                      >
+                        {generatingDiagram === l1Case.id ? (
+                          <>
+                            <Loader2 size={14} className="animate-spin" />
+                            <span>Generating...</span>
+                          </>
+                        ) : diagrams[l1Case.id] ? (
+                          <>
+                            <Image size={14} />
+                            <span>View Diagram</span>
+                          </>
+                        ) : (
+                          <>
+                            <Image size={14} />
+                            <span>Generate Diagram</span>
+                          </>
+                        )}
+                      </button>
+                    )}
                   </div>
 
                   {/* L2 Children */}
@@ -195,6 +318,39 @@ const TestCaseTree = ({ sessionState, onSelectCase, loading, loadingNode }) => {
                                     Generating...
                                   </span>
                                 )}
+                                {/* Generate Diagram Button for L2 */}
+                                {!isL2Loading && l2HasL3(l2Case) && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      if (diagrams[l2Case.id]) {
+                                        handleViewDiagram(l2Case.id)
+                                      } else {
+                                        handleGenerateDiagram(l2Case.id, l2Case.title, 'l2')
+                                      }
+                                    }}
+                                    disabled={generatingDiagram === l2Case.id}
+                                    className="ml-2 px-3 py-1.5 text-xs bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 transition"
+                                    title={diagrams[l2Case.id] ? 'View Diagram' : 'Generate Diagram'}
+                                  >
+                                    {generatingDiagram === l2Case.id ? (
+                                      <>
+                                        <Loader2 size={14} className="animate-spin" />
+                                        <span>Generating...</span>
+                                      </>
+                                    ) : diagrams[l2Case.id] ? (
+                                      <>
+                                        <Image size={14} />
+                                        <span>View</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Image size={14} />
+                                        <span>Generate</span>
+                                      </>
+                                    )}
+                                  </button>
+                                )}
                               </div>
 
                               {/* L3 Children */}
@@ -245,6 +401,25 @@ const TestCaseTree = ({ sessionState, onSelectCase, loading, loadingNode }) => {
           </div>
         </div>
       )}
+
+      {/* PlantUML Diagram Modal */}
+      <PlantUMLDiagramModal
+        isOpen={modalOpen}
+        onClose={() => {
+          setModalOpen(false)
+          setCurrentDiagramId(null)
+          setCurrentDiagramType(null)
+          setCurrentTestCaseId(null)
+        }}
+        diagramId={currentDiagramId}
+        sessionId={sessionId}
+        testCaseId={currentTestCaseId}
+        diagramType={currentDiagramType}
+        onEdit={() => {
+          // Reload diagrams after edit
+          loadDiagrams()
+        }}
+      />
     </div>
   )
 }

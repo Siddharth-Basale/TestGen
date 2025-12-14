@@ -59,5 +59,26 @@ export const streamRequest = async (url, options = {}) => {
   return response
 }
 
+// PlantUML API functions
+export const generatePlantUMLDiagram = async (sessionId, testCaseId, diagramType, testCaseTitle) => {
+  return api.post(`/api/sessions/${sessionId}/plantuml/generate`, {
+    session_id: sessionId,
+    test_case_id: testCaseId,
+    diagram_type: diagramType,
+    test_case_title: testCaseTitle
+  })
+}
+
+export const getSessionDiagrams = async (sessionId) => {
+  return api.get(`/api/sessions/${sessionId}/plantuml`)
+}
+
+export const editPlantUMLDiagram = async (diagramId, editPrompt, diagramType = 'activity') => {
+  return api.post(`/api/plantuml/${diagramId}/edit`, {
+    edit_prompt: editPrompt,
+    diagram_type: diagramType
+  })
+}
+
 export default api
 

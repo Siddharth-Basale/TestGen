@@ -1,22 +1,24 @@
 """
 FastAPI Backend for Test Case Generation System
 """
-from fastapi import FastAPI, Depends, HTTPException, status, Query, Header, Request
+from fastapi import FastAPI, Depends, HTTPException, status, Query, Header, Request, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from sqlalchemy.sql import func
+from typing import List, Optional, Dict
 import uvicorn
 import json
 import asyncio
 
 from database import SessionLocal, engine, Base
-from models import User, Session as SessionModel
+from models import User, Session as SessionModel, PlantUMLDiagram
 from schemas import (
     UserCreate, UserResponse, Token, 
     SessionCreate, SessionResponse, SessionUpdate,
-    TestCaseStateResponse, QuestionAnswer
+    TestCaseStateResponse, QuestionAnswer,
+    PlantUMLGenerateRequest, PlantUMLEditRequest, PlantUMLDiagramResponse, PlantUMLImageResponse
 )
 from auth import (
     get_password_hash, verify_password, 
@@ -25,7 +27,12 @@ from auth import (
 import sys
 import os
 
-from testcasegen import TestCaseGenerator, generate_session_title
+from testcasegen import TestCaseGenerator, generate_session_title, get_llm
+from langchain_core.messages import SystemMessage, HumanMessage
+from plantuml_service import render_plantuml_from_text
+from fastapi.responses import Response
+import tempfile
+import base64
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -1859,6 +1866,428 @@ def get_session_state(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to get session state: {str(e)}")
+
+
+# ============================================================================
+# PLANTUML DIAGRAM ENDPOINTS
+# ============================================================================
+
+SYSTEM_BASE = """You are an expert PlantUML sequence diagram generator. You generate clear, well-structured PlantUML SEQUENCE diagrams that visualize end-to-end test case flows, showing interactions between actors, components, and systems in chronological order."""
+
+
+def generate_plantuml_code_from_testcases(test_cases: List[Dict], diagram_type: str = "sequence", parent_title: str = "") -> str:
+    """
+    Generate PlantUML SEQUENCE diagram code from test cases using LLM.
+    
+    Args:
+        test_cases: List of test case dictionaries (L2 or L3 cases)
+        diagram_type: Type of diagram (always "sequence" for end-to-end test cases)
+        parent_title: Title of parent test case
+    
+    Returns:
+        PlantUML sequence diagram code as string
+    """
+    llm = get_llm()
+    
+    # Build test cases summary
+    testcases_summary = []
+    for tc in test_cases:
+        tc_summary = {
+            "id": tc.get("id", ""),
+            "title": tc.get("title", ""),
+            "description": tc.get("description", ""),
+        }
+        
+        # Add L3-specific fields
+        if "test_steps" in tc:
+            tc_summary["test_steps"] = tc.get("test_steps", [])
+            tc_summary["expected_result"] = tc.get("expected_result", "")
+        
+        testcases_summary.append(tc_summary)
+    
+    prompt = (
+        SYSTEM_BASE + "\n\n"
+        f"TASK: Generate PlantUML SEQUENCE diagram code for the following end-to-end test cases.\n\n"
+        f"Parent Test Case: {parent_title}\n\n"
+        f"Test Cases:\n{json.dumps(testcases_summary, indent=2)}\n\n"
+        "CRITICAL REQUIREMENTS:\n"
+        "- Generate a SEQUENCE DIAGRAM (NOT activity diagram, NOT flowchart).\n"
+        "- Use @startuml and @enduml tags with sequence diagram syntax.\n"
+        "- Show the end-to-end flow of test cases in chronological order.\n"
+        "- Identify actors/components (e.g., User, System, Database, API, etc.) as participants.\n"
+        "- Show interactions between participants as arrows (->, -->, ->>, etc.).\n"
+        "- Include all test steps from the test cases as messages between participants.\n"
+        "- Show the sequence of operations from start to finish.\n"
+        "- Use proper PlantUML sequence diagram syntax:\n"
+        "  * Define participants: participant User, participant System, etc.\n"
+        "  * Show messages: User -> System: action\n"
+        "  * Show return values: System --> User: response\n"
+        "  * Use activation boxes: activate/deactivate\n"
+        "  * Group related operations: alt/else/end, loop/end, opt/end\n"
+        "- Include test case titles, descriptions, and test steps in the sequence.\n"
+        "- Show expected results as return messages or notes.\n"
+        "- Make the diagram clear, readable, and show the complete end-to-end flow.\n"
+        "- Use appropriate colors and styling for better visualization.\n\n"
+        "Return ONLY the PlantUML SEQUENCE diagram code, starting with @startuml and ending with @enduml.\n"
+        "Do not include any markdown code blocks, explanations, or additional text.\n"
+        "IMPORTANT: This MUST be a sequence diagram, not an activity diagram or flowchart."
+    )
+    
+    messages = [
+        SystemMessage(content="You are a PlantUML SEQUENCE diagram generator. Return ONLY valid PlantUML SEQUENCE diagram code without markdown or explanations. Always generate sequence diagrams, never activity diagrams or flowcharts."),
+        HumanMessage(content=prompt)
+    ]
+    
+    response = llm.invoke(messages)
+    
+    # Extract content
+    if hasattr(response, 'content'):
+        plantuml_code = response.content
+    elif isinstance(response, str):
+        plantuml_code = response
+    else:
+        plantuml_code = str(response)
+    
+    # Clean up the response - remove markdown code blocks if present
+    plantuml_code = plantuml_code.strip()
+    if "```" in plantuml_code:
+        import re
+        match = re.search(r'```(?:plantuml|puml)?\s*\n?(.*?)```', plantuml_code, re.DOTALL)
+        if match:
+            plantuml_code = match.group(1).strip()
+        else:
+            plantuml_code = plantuml_code.replace("```plantuml", "").replace("```puml", "").replace("```", "").strip()
+    
+    # Ensure it starts with @startuml and ends with @enduml
+    if not plantuml_code.startswith("@startuml"):
+        plantuml_code = "@startuml\n" + plantuml_code
+    if not plantuml_code.endswith("@enduml"):
+        plantuml_code = plantuml_code + "\n@enduml"
+    
+    return plantuml_code
+
+
+@app.post("/api/sessions/{session_id}/plantuml/generate", response_model=PlantUMLDiagramResponse)
+def generate_plantuml_diagram(
+    session_id: int,
+    request_data: PlantUMLGenerateRequest,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Generate PlantUML diagram for L1 or L2 test case and save to database.
+    
+    For L2: Generates diagram from all L3 cases under the L2 case.
+    For L1: Generates diagram from all L2 and L3 cases under the L1 case.
+    """
+    authorization = request.headers.get("Authorization")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    try:
+        token = authorization[7:]
+        from jose import jwt, JWTError
+        from auth import SECRET_KEY, ALGORITHM
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        
+        # Get session and verify ownership
+        db_session = db.query(SessionModel).filter(
+            SessionModel.id == session_id,
+            SessionModel.user_id == user.id
+        ).first()
+        if not db_session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        user_id = user.id
+        state_data = db_session.state_data or {}
+        
+        # Collect test cases based on diagram type
+        test_cases = []
+        parent_title = request_data.test_case_title
+        
+        if request_data.diagram_type == "l2":
+            # Get all L3 cases for this L2 case
+            l3_cases = state_data.get("l3_test_cases", [])
+            test_cases = [tc for tc in l3_cases if tc.get("parent_l2_id") == request_data.test_case_id]
+            
+            if not test_cases:
+                raise HTTPException(status_code=400, detail="No L3 test cases found for this L2 case")
+        
+        elif request_data.diagram_type == "l1":
+            # Get all L2 cases for this L1 case, and their L3 cases
+            l2_cases = state_data.get("l2_test_cases", [])
+            l3_cases = state_data.get("l3_test_cases", [])
+            
+            # Get L2 cases for this L1
+            l2_for_l1 = [l2 for l2 in l2_cases if l2.get("parent_l1_id") == request_data.test_case_id]
+            
+            # For each L2, get its L3 cases and combine
+            for l2 in l2_for_l1:
+                test_cases.append(l2)  # Add L2 case
+                # Add all L3 cases for this L2
+                l3_for_l2 = [l3 for l3 in l3_cases if l3.get("parent_l2_id") == l2.get("id")]
+                test_cases.extend(l3_for_l2)
+            
+            if not test_cases:
+                raise HTTPException(status_code=400, detail="No L2/L3 test cases found for this L1 case")
+        
+        else:
+            raise HTTPException(status_code=400, detail="Invalid diagram_type. Must be 'l1' or 'l2'")
+        
+        # Generate PlantUML code (always sequence diagram for end-to-end test cases)
+        plantuml_code = generate_plantuml_code_from_testcases(
+            test_cases=test_cases,
+            diagram_type="sequence",  # Always use sequence diagram for end-to-end test cases
+            parent_title=parent_title
+        )
+        
+        # Render PlantUML to PNG
+        temp_dir = tempfile.mkdtemp()
+        png_path, _ = render_plantuml_from_text(plantuml_code, temp_dir, "diagram")
+        
+        # Read PNG file
+        with open(png_path, "rb") as f:
+            image_data = f.read()
+        
+        # Check if diagram already exists for this test case
+        existing_diagram = db.query(PlantUMLDiagram).filter(
+            PlantUMLDiagram.session_id == session_id,
+            PlantUMLDiagram.test_case_id == request_data.test_case_id,
+            PlantUMLDiagram.diagram_type == request_data.diagram_type
+        ).first()
+        
+        if existing_diagram:
+            # Update existing diagram
+            existing_diagram.plantuml_code = plantuml_code
+            existing_diagram.image_data = image_data
+            from datetime import datetime
+            existing_diagram.updated_at = datetime.utcnow()
+            db.commit()
+            db.refresh(existing_diagram)
+            diagram = existing_diagram
+        else:
+            # Create new diagram
+            diagram = PlantUMLDiagram(
+                session_id=session_id,
+                user_id=user_id,
+                diagram_type=request_data.diagram_type,
+                test_case_id=request_data.test_case_id,
+                test_case_title=request_data.test_case_title,
+                plantuml_code=plantuml_code,
+                image_data=image_data
+            )
+            db.add(diagram)
+            db.commit()
+            db.refresh(diagram)
+        
+        # Clean up temp directory
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        
+        return PlantUMLDiagramResponse(
+            id=diagram.id,
+            session_id=diagram.session_id,
+            diagram_type=diagram.diagram_type,
+            test_case_id=diagram.test_case_id,
+            test_case_title=diagram.test_case_title,
+            plantuml_code=diagram.plantuml_code,
+            image_url=f"/api/plantuml/{diagram.id}/image",
+            created_at=diagram.created_at,
+            updated_at=diagram.updated_at
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate PlantUML diagram: {str(e)}")
+
+
+@app.post("/api/plantuml/{diagram_id}/edit", response_model=PlantUMLDiagramResponse)
+def edit_plantuml_diagram(
+    diagram_id: int,
+    request: PlantUMLEditRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Edit existing PlantUML diagram based on user's edit prompt.
+    """
+    try:
+        diagram = db.query(PlantUMLDiagram).filter(PlantUMLDiagram.id == diagram_id).first()
+        if not diagram:
+            raise HTTPException(status_code=404, detail="Diagram not found")
+        
+        llm = get_llm()
+        
+        prompt = (
+            SYSTEM_BASE + "\n\n"
+            f"TASK: Edit the following PlantUML SEQUENCE diagram code based on the user's edit instructions.\n\n"
+            f"ORIGINAL PlantUML SEQUENCE Diagram Code:\n```plantuml\n{diagram.plantuml_code}\n```\n\n"
+            f"USER EDIT INSTRUCTIONS:\n{request.edit_prompt}\n\n"
+            "INSTRUCTIONS:\n"
+            "- This is a SEQUENCE DIAGRAM - maintain it as a sequence diagram (NOT activity or flowchart).\n"
+            "- Modify the PlantUML sequence diagram code according to the user's edit instructions.\n"
+            "- Maintain valid PlantUML sequence diagram syntax with @startuml and @enduml tags.\n"
+            "- Preserve the sequence diagram structure (participants, messages, activations) unless the edit requires structural changes.\n"
+            "- Apply the requested changes accurately while keeping the diagram readable.\n"
+            "- Keep the chronological flow and participant interactions clear.\n"
+            "- Use appropriate colors and styling for better visualization.\n"
+            "- If the edit instructions are unclear, make reasonable assumptions while maintaining sequence diagram format.\n\n"
+            "Return ONLY the modified PlantUML SEQUENCE diagram code, starting with @startuml and ending with @enduml.\n"
+            "Do not include any markdown code blocks, explanations, or additional text.\n"
+            "IMPORTANT: Maintain this as a sequence diagram, not an activity diagram or flowchart."
+        )
+        
+        messages = [
+            SystemMessage(content="You are a PlantUML SEQUENCE diagram editor. Return ONLY valid PlantUML SEQUENCE diagram code without markdown or explanations. Always maintain sequence diagram format, never convert to activity diagrams or flowcharts."),
+            HumanMessage(content=prompt)
+        ]
+        
+        response = llm.invoke(messages)
+        
+        # Extract and clean PlantUML code
+        if hasattr(response, 'content'):
+            plantuml_code = response.content
+        else:
+            plantuml_code = str(response)
+        
+        plantuml_code = plantuml_code.strip()
+        if "```" in plantuml_code:
+            import re
+            match = re.search(r'```(?:plantuml|puml)?\s*\n?(.*?)```', plantuml_code, re.DOTALL)
+            if match:
+                plantuml_code = match.group(1).strip()
+            else:
+                plantuml_code = plantuml_code.replace("```plantuml", "").replace("```puml", "").replace("```", "").strip()
+        
+        if not plantuml_code.startswith("@startuml"):
+            plantuml_code = "@startuml\n" + plantuml_code
+        if not plantuml_code.endswith("@enduml"):
+            plantuml_code = plantuml_code + "\n@enduml"
+        
+        # Render updated PlantUML to PNG
+        temp_dir = tempfile.mkdtemp()
+        png_path, _ = render_plantuml_from_text(plantuml_code, temp_dir, "diagram")
+        
+        # Read PNG file
+        with open(png_path, "rb") as f:
+            image_data = f.read()
+        
+        # Update diagram
+        diagram.plantuml_code = plantuml_code
+        diagram.image_data = image_data
+        from datetime import datetime
+        diagram.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(diagram)
+        
+        # Clean up temp directory
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        
+        return PlantUMLDiagramResponse(
+            id=diagram.id,
+            session_id=diagram.session_id,
+            diagram_type=diagram.diagram_type,
+            test_case_id=diagram.test_case_id,
+            test_case_title=diagram.test_case_title,
+            plantuml_code=diagram.plantuml_code,
+            image_url=f"/api/plantuml/{diagram.id}/image",
+            created_at=diagram.created_at,
+            updated_at=diagram.updated_at
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to edit PlantUML diagram: {str(e)}")
+
+
+@app.get("/api/plantuml/{diagram_id}/image")
+def get_plantuml_image(
+    diagram_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Retrieve PlantUML diagram image as PNG.
+    """
+    diagram = db.query(PlantUMLDiagram).filter(PlantUMLDiagram.id == diagram_id).first()
+    if not diagram:
+        raise HTTPException(status_code=404, detail="Diagram not found")
+    
+    return Response(
+        content=diagram.image_data,
+        media_type="image/png",
+        headers={"Content-Disposition": f"inline; filename=diagram_{diagram_id}.png"}
+    )
+
+
+@app.get("/api/sessions/{session_id}/plantuml", response_model=List[PlantUMLDiagramResponse])
+def get_session_diagrams(
+    session_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Get all PlantUML diagrams for a session.
+    """
+    authorization = request.headers.get("Authorization")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    try:
+        token = authorization[7:]
+        from jose import jwt, JWTError
+        from auth import SECRET_KEY, ALGORITHM
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        
+        # Verify session belongs to user
+        db_session = db.query(SessionModel).filter(
+            SessionModel.id == session_id,
+            SessionModel.user_id == user.id
+        ).first()
+        
+        if not db_session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        diagrams = db.query(PlantUMLDiagram).filter(
+            PlantUMLDiagram.session_id == session_id
+        ).order_by(PlantUMLDiagram.created_at.desc()).all()
+        
+        return [
+            PlantUMLDiagramResponse(
+                id=d.id,
+                session_id=d.session_id,
+                diagram_type=d.diagram_type,
+                test_case_id=d.test_case_id,
+                test_case_title=d.test_case_title,
+                plantuml_code=d.plantuml_code,
+                image_url=f"/api/plantuml/{d.id}/image",
+                created_at=d.created_at,
+                updated_at=d.updated_at
+            )
+            for d in diagrams
+        ]
+    
+    except HTTPException:
+        raise
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get diagrams: {str(e)}")
 
 
 if __name__ == "__main__":

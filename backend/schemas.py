@@ -87,3 +87,39 @@ class TestCaseStateResponse(BaseModel):
 class QuestionAnswer(BaseModel):
     answers: Dict[str, str]  # question -> answer mapping
 
+
+# PlantUML schemas
+class PlantUMLGenerateRequest(BaseModel):
+    session_id: int
+    test_case_id: str  # L1 or L2 test case ID
+    diagram_type: str  # "l1" or "l2"
+    test_case_title: str
+
+
+class PlantUMLEditRequest(BaseModel):
+    diagram_id: int
+    edit_prompt: str
+    diagram_type: Optional[str] = "activity"  # activity, sequence, flowchart
+
+
+class PlantUMLDiagramResponse(BaseModel):
+    id: int
+    session_id: int
+    diagram_type: str
+    test_case_id: str
+    test_case_title: str
+    plantuml_code: str
+    image_url: str  # URL to retrieve the image
+    created_at: datetime
+    updated_at: Optional[datetime]
+    
+    class Config:
+        from_attributes = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None
+        }
+
+
+class PlantUMLImageResponse(BaseModel):
+    image_data: bytes  # Base64 encoded or binary
+    content_type: str = "image/png"
