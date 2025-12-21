@@ -65,7 +65,7 @@ class TestCaseState(TypedDict):
 def get_llm():
     """Initialize the LLM (adjust model and API key as needed)"""
     return ChatOpenAI(
-        model="gpt-4o-mini",
+        model="gpt-4.1-mini",
         temperature=0.7,
         api_key=openai_api_key,
         streaming=True,  # Enable streaming
@@ -703,14 +703,16 @@ CONTEXT FROM ALL PREVIOUS ANSWERS:
 
 INSTRUCTIONS:
 1. Generate exactly 3-5 clarification questions specific to this L2 test case
-2. Questions should help generate L3 (detailed-level) test cases
-3. Avoid duplicate questions based on the context provided
-4. Each question must have exactly 3-5 suggested answer options
+2. Questions should help generate L3 (detailed UI-level) test cases with exact UI navigation steps
+3. Focus on UI elements, user interactions, navigation flows, and UI verification points
+4. Avoid duplicate questions based on the context provided
+5. Each question must have exactly 3-5 suggested answer options
+6. Questions should guide towards detailed UI test steps (e.g., "What UI elements are involved?", "What are the specific user interactions?", "What UI states need to be verified?")
 
 REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
 [
-    {{"question": "What are the specific test steps?", "suggested_answers": ["Setup", "Execute", "Verify", "Cleanup", "Document"]}},
-    {{"question": "What are the expected results?", "suggested_answers": ["Success", "Failure", "Partial Success", "Timeout", "Error"]}}
+    {{"question": "What are the specific UI elements and navigation steps required?", "suggested_answers": ["Buttons and Forms", "Dropdowns and Menus", "Input Fields and Validation", "Navigation Links", "Modal Dialogs"]}},
+    {{"question": "What UI states and visual feedback should be verified?", "suggested_answers": ["Success Messages", "Error Messages", "Loading States", "Page Redirects", "Element Visibility"]}}
 ]
 
 CRITICAL:
@@ -853,12 +855,19 @@ CURRENT L3 CLARIFICATION ANSWERS:
 {l3_answers_text if l3_answers_text else "No L3 answers were provided."}
 
 INSTRUCTIONS:
-1. Generate exactly 5-10 detailed L3 test cases
-2. Each test case must be very specific and detailed
-3. Each test case must include test_steps (array of strings) and expected_result (string)
-4. Use sequential IDs starting from L3_001
-5. Each test case must reference the parent L2 case ID: {selected_l2.get('id', 'L2_001')}
-6. Use all context from previous and current answers
+1. Generate exactly 5-10 detailed L3 test cases with IN-DEPTH UI-LEVEL navigation steps
+2. Each test case must be very specific and detailed with EXACT UI navigation steps
+3. Each test case must include test_steps (array of strings) with DETAILED UI interactions:
+   - Specify exact UI elements (buttons, input fields, menus, dropdowns, checkboxes, radio buttons, links, etc.)
+   - Include step-by-step UI navigation (e.g., "Click on the 'Login' button in the top navigation bar", "Enter text in the 'Email Address' input field", "Select 'Option A' from the dropdown menu")
+   - Include UI element locations/identifiers when relevant (e.g., "Click the 'Submit' button located at the bottom right of the form")
+   - Break down complex actions into granular UI steps
+   - Include verification steps that check UI elements (e.g., "Verify that the 'Success' message appears in the notification area")
+4. Each test case must include expected_result (string) describing the UI state/outcome
+5. Use sequential IDs starting from L3_001
+6. Each test case must reference the parent L2 case ID: {selected_l2.get('id', 'L2_001')}
+7. Use all context from previous and current answers
+8. Focus on UI-level detail: every click, input, selection, navigation, and verification should be explicitly stated
 
 REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
 [
@@ -866,16 +875,37 @@ REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
         "id": "L3_001",
         "title": "Valid Email Login",
         "description": "Test login with valid email and password",
-        "test_steps": ["Navigate to login page", "Enter valid email", "Enter valid password", "Click login"],
-        "expected_result": "User is successfully logged in",
+        "test_steps": [
+            "Open the web browser and navigate to the application URL",
+            "Locate and click on the 'Sign In' button in the top-right corner of the homepage",
+            "Verify that the login page is displayed with 'Email' and 'Password' input fields",
+            "Click inside the 'Email Address' input field",
+            "Enter a valid email address (e.g., 'user@example.com')",
+            "Click inside the 'Password' input field",
+            "Enter a valid password",
+            "Locate and click the 'Login' button at the bottom of the login form",
+            "Verify that the page redirects to the dashboard",
+            "Verify that the user's name/profile icon appears in the top navigation bar"
+        ],
+        "expected_result": "User is successfully logged in and redirected to the dashboard page with user profile visible in navigation",
         "parent_l2_id": "{selected_l2.get('id', 'L2_001')}"
     }},
     {{
         "id": "L3_002",
         "title": "Invalid Password Login",
         "description": "Test login with invalid password",
-        "test_steps": ["Navigate to login page", "Enter valid email", "Enter invalid password", "Click login"],
-        "expected_result": "Error message displayed: Invalid credentials",
+        "test_steps": [
+            "Open the web browser and navigate to the application URL",
+            "Click on the 'Sign In' button in the top-right corner",
+            "Verify the login page is displayed",
+            "Click inside the 'Email Address' input field and enter a valid email",
+            "Click inside the 'Password' input field and enter an incorrect password",
+            "Click the 'Login' button",
+            "Verify that an error message appears below the password field",
+            "Verify that the error message text displays 'Invalid credentials' or similar",
+            "Verify that the user remains on the login page and is not redirected"
+        ],
+        "expected_result": "Error message 'Invalid credentials' is displayed in red text below the password field, and user remains on login page",
         "parent_l2_id": "{selected_l2.get('id', 'L2_001')}"
     }}
 ]
@@ -1735,14 +1765,16 @@ CONTEXT FROM ALL PREVIOUS ANSWERS:
 
 INSTRUCTIONS:
 1. Generate exactly 3-5 clarification questions specific to this L2 test case
-2. Questions should help generate L3 (detailed-level) test cases
-3. Avoid duplicate questions based on the context provided
-4. Each question must have exactly 3-5 suggested answer options
+2. Questions should help generate L3 (detailed UI-level) test cases with exact UI navigation steps
+3. Focus on UI elements, user interactions, navigation flows, and UI verification points
+4. Avoid duplicate questions based on the context provided
+5. Each question must have exactly 3-5 suggested answer options
+6. Questions should guide towards detailed UI test steps (e.g., "What UI elements are involved?", "What are the specific user interactions?", "What UI states need to be verified?")
 
 REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
 [
-    {{"question": "What are the specific test steps?", "suggested_answers": ["Setup", "Execute", "Verify", "Cleanup", "Document"]}},
-    {{"question": "What are the expected results?", "suggested_answers": ["Success", "Failure", "Partial Success", "Timeout", "Error"]}}
+    {{"question": "What are the specific UI elements and navigation steps required?", "suggested_answers": ["Buttons and Forms", "Dropdowns and Menus", "Input Fields and Validation", "Navigation Links", "Modal Dialogs"]}},
+    {{"question": "What UI states and visual feedback should be verified?", "suggested_answers": ["Success Messages", "Error Messages", "Loading States", "Page Redirects", "Element Visibility"]}}
 ]
 
 CRITICAL:
@@ -1851,12 +1883,19 @@ CURRENT L3 CLARIFICATION ANSWERS:
 {l3_answers_text if l3_answers_text else "No L3 answers were provided."}
 
 INSTRUCTIONS:
-1. Generate exactly 5-10 detailed L3 test cases
-2. Each test case must be very specific and detailed
-3. Each test case must include test_steps (array of strings) and expected_result (string)
-4. Use sequential IDs starting from L3_001
-5. Each test case must reference the parent L2 case ID: {selected_l2.get('id', 'L2_001')}
-6. Use all context from previous and current answers
+1. Generate exactly 5-10 detailed L3 test cases with IN-DEPTH UI-LEVEL navigation steps
+2. Each test case must be very specific and detailed with EXACT UI navigation steps
+3. Each test case must include test_steps (array of strings) with DETAILED UI interactions:
+   - Specify exact UI elements (buttons, input fields, menus, dropdowns, checkboxes, radio buttons, links, etc.)
+   - Include step-by-step UI navigation (e.g., "Click on the 'Login' button in the top navigation bar", "Enter text in the 'Email Address' input field", "Select 'Option A' from the dropdown menu")
+   - Include UI element locations/identifiers when relevant (e.g., "Click the 'Submit' button located at the bottom right of the form")
+   - Break down complex actions into granular UI steps
+   - Include verification steps that check UI elements (e.g., "Verify that the 'Success' message appears in the notification area")
+4. Each test case must include expected_result (string) describing the UI state/outcome
+5. Use sequential IDs starting from L3_001
+6. Each test case must reference the parent L2 case ID: {selected_l2.get('id', 'L2_001')}
+7. Use all context from previous and current answers
+8. Focus on UI-level detail: every click, input, selection, navigation, and verification should be explicitly stated
 
 REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
 [
@@ -1864,16 +1903,37 @@ REQUIRED JSON FORMAT (NO OTHER TEXT, NO MARKDOWN, ONLY RAW JSON):
         "id": "L3_001",
         "title": "Valid Email Login",
         "description": "Test login with valid email and password",
-        "test_steps": ["Navigate to login page", "Enter valid email", "Enter valid password", "Click login"],
-        "expected_result": "User is successfully logged in",
+        "test_steps": [
+            "Open the web browser and navigate to the application URL",
+            "Locate and click on the 'Sign In' button in the top-right corner of the homepage",
+            "Verify that the login page is displayed with 'Email' and 'Password' input fields",
+            "Click inside the 'Email Address' input field",
+            "Enter a valid email address (e.g., 'user@example.com')",
+            "Click inside the 'Password' input field",
+            "Enter a valid password",
+            "Locate and click the 'Login' button at the bottom of the login form",
+            "Verify that the page redirects to the dashboard",
+            "Verify that the user's name/profile icon appears in the top navigation bar"
+        ],
+        "expected_result": "User is successfully logged in and redirected to the dashboard page with user profile visible in navigation",
         "parent_l2_id": "{selected_l2.get('id', 'L2_001')}"
     }},
     {{
         "id": "L3_002",
         "title": "Invalid Password Login",
         "description": "Test login with invalid password",
-        "test_steps": ["Navigate to login page", "Enter valid email", "Enter invalid password", "Click login"],
-        "expected_result": "Error message displayed: Invalid credentials",
+        "test_steps": [
+            "Open the web browser and navigate to the application URL",
+            "Click on the 'Sign In' button in the top-right corner",
+            "Verify the login page is displayed",
+            "Click inside the 'Email Address' input field and enter a valid email",
+            "Click inside the 'Password' input field and enter an incorrect password",
+            "Click the 'Login' button",
+            "Verify that an error message appears below the password field",
+            "Verify that the error message text displays 'Invalid credentials' or similar",
+            "Verify that the user remains on the login page and is not redirected"
+        ],
+        "expected_result": "Error message 'Invalid credentials' is displayed in red text below the password field, and user remains on login page",
         "parent_l2_id": "{selected_l2.get('id', 'L2_001')}"
     }}
 ]
